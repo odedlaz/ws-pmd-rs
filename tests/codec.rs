@@ -475,9 +475,10 @@ fn a_no_takeover_decoder_reads_independent_messages_exactly() {
 ///
 /// `reset` keeps the negotiated window only at 15, so every narrower agreement
 /// takes the other route -- and no other row in this file negotiates a narrow
-/// window and `no_context_takeover` together, which left that route undriven.
-/// A peer at the negotiated width is what makes the second message decode only
-/// if the rebuild produced a working inflater rather than a fresh default one.
+/// window and `no_context_takeover` together, which left that route unexecuted.
+/// What this proves is that the rebuilt inflater works and drops its history,
+/// not which route ran: a conforming width-9 message decodes through a
+/// default-width inflater just as well. Route selection is the C arm's.
 #[test]
 fn a_narrow_no_takeover_decoder_reads_independent_messages_exactly() {
     let mut decoder =

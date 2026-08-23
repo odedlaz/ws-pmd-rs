@@ -8,10 +8,9 @@
 # What the lint buys, and what it does not: on the pinned zlib-rs backend no test
 # catches an unconditional revert to `reset`, which is why it exists, but
 # centralising the call is all it proves. Widening `reinitialise`'s condition to
-# always-true goes through this allowed call, so route selection is unguarded
-# rather than un-compilable. Both regressions are observable on a C-zlib build,
-# by decode rather than by allocation -- and a test whose verdict inverts under
-# feature unification is not a gate, which is why neither is guarded here.
+# always-true goes through this allowed call, so this lint does not pin the route
+# either. Both regressions are observable on a C-zlib build by decode rather than
+# by allocation, and that is what the named C validation arm asserts.
 disallowed-methods = [
     { path = "flate2::Decompress::reset", reason = "reinitialises at 15, discarding a narrower negotiated window; use InflaterConfig::reinitialise" },
 ]

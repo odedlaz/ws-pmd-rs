@@ -1,0 +1,22 @@
+# The zlib-rs arm: the backend the library pins, added here explicitly so the
+# arm names its own backend rather than inheriting one. Records the deliberate
+# leniency that makes the C arm's rejections meaningful.
+#
+# `[workspace]` keeps this its own build. Building the two arms together would
+# unify their features and silently give both the C backend.
+[package]
+name = "zlib-rs-arm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+permessage-deflate = { path = "../.." }
+http = "1"
+
+[dependencies.flate2]
+version = "1.0.31"
+default-features = false
+features = ["zlib-rs"]

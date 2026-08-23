@@ -258,9 +258,20 @@ impl Decoder {
         limit: DecompressedLimit,
         output: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        self.inflate(input, limit, output)?;
+        let ended = self.inflate(input, limit, output)?;
         if final_fragment {
-            self.inflate(TRAILER, limit, output)?;
+            // Only a message that was flushed with `Z_SYNC_FLUSH` had a trailer
+            // stripped from it, and only that message needs one fed back. A peer
+            // that ended its stream with `BFINAL` instead has already delivered
+            // everything, and the inflater it left behind was rebuilt -- so it
+            // sits byte-aligned at the start of a stream, where `00 00 ff ff` is
+            // not an empty stored block at all. Feeding it there corrupts the
+            // stream: the four bytes need a preceding partial byte to carry the
+            // three header bits, and byte-aligned they parse as a stored block
+            // with a bogus length.
+            if !ended {
+                self.inflate(TRAILER, limit, output)?;
+            }
             if self.reset_between_messages {
                 self.config.reinitialise(&mut self.inflater);
             }
@@ -268,12 +279,13 @@ impl Decoder {
         Ok(())
     }
 
+    /// Returns whether the peer's DEFLATE stream ended during these bytes.
     fn inflate(
         &mut self,
         mut input: &[u8],
         limit: DecompressedLimit,
         output: &mut Vec<u8>,
-    ) -> Result<(), CodecError> {
+    ) -> Result<bool, CodecError> {
         let mut scratch = [0u8; SCRATCH];
         loop {
             let produced_so_far = self.delivered.saturating_add(output.len());
@@ -307,10 +319,16 @@ impl Decoder {
                 // old window, so resetting mirrors it. Without this the inflater
                 // stays finished and every later message decodes to nothing.
                 self.config.reinitialise(&mut self.inflater);
+                // And stop here. The stream is over, so anything still unread is
+                // this message's padding, and the inflater is now byte-aligned at
+                // the start of a fresh stream. Feeding either the remainder or
+                // the trailer into that state corrupts it -- silently, because
+                // both parse as a stored block with a length nobody sent.
+                return Ok(true);
             }
             match step.remaining {
                 Some(rest) => input = rest,
-                None => return Ok(()),
+                None => return Ok(false),
             }
         }
     }

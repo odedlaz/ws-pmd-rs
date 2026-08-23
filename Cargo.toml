@@ -48,10 +48,14 @@ default-features = false
 
 # The decoder's tests drive it from an independent `flate2` peer rather than this
 # crate's own encoder, so a shared mistake cannot pass as a round trip.
+#
+# It names no backend on purpose. Asking for one here would satisfy `flate2`
+# whatever the feature table above forwards, so a broken forward would still
+# build and every test would still pass -- the suite would be proving the
+# dev-dependency's request rather than the crate's public feature surface.
 [dev-dependencies.flate2]
 version = "1.0.31"
 default-features = false
-features = ["zlib-rs"]
 
 [lints.rust]
 missing_docs = "warn"

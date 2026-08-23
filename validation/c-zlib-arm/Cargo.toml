@@ -1,10 +1,14 @@
-# The C-zlib arm. It adds flate2's `zlib` feature the way any downstream crate
-# might; Cargo's additive features then unify it with the library's `zlib-rs`
-# request, `any_c_zlib` wins flate2's dispatch, and the crate under test runs on
-# C zlib. That substitution is the thing being validated, not a workaround.
+# The C-zlib arm. It selects the backend the way a consumer does -- the library's
+# default off, its `zlib` feature on -- so C zlib is the only backend in the
+# graph and nothing has to win a dispatch. That is the change worth naming: while
+# the arm took the default, `zlib-rs` was resolved alongside `libz-sys` and the
+# arm ran on C only because `any_c_zlib` suppressed the Rust module. That
+# suppression is a property of recent flate2; below 1.1.9 the precedence runs the
+# other way, and the arm would have quietly become a second Rust arm while
+# claiming to be the C one.
 #
 # `[workspace]` keeps this its own build. Building the two arms together would
-# unify their features and silently give both the C backend.
+# unify their features, and then only the dispatch rule would separate them.
 [package]
 name = "c-zlib-arm"
 version = "0.0.0"
@@ -14,7 +18,7 @@ publish = false
 [workspace]
 
 [dependencies]
-permessage-deflate = { path = "../.." }
+permessage-deflate = { path = "../..", default-features = false, features = ["zlib"] }
 http = "1"
 
 [dependencies.flate2]

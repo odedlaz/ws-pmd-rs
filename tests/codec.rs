@@ -470,6 +470,27 @@ fn a_no_takeover_decoder_reads_independent_messages_exactly() {
     }
 }
 
+/// The same independence, at a width that reinitialises by rebuilding instead
+/// of by resetting.
+///
+/// `reset` keeps the negotiated window only at 15, so every narrower agreement
+/// takes the other route -- and no other row in this file negotiates a narrow
+/// window and `no_context_takeover` together, which left that route undriven.
+/// A peer at the negotiated width is what makes the second message decode only
+/// if the rebuild produced a working inflater rather than a fresh default one.
+#[test]
+fn a_narrow_no_takeover_decoder_reads_independent_messages_exactly() {
+    let mut decoder =
+        decoder_for(b"permessage-deflate; server_no_context_takeover; server_max_window_bits=9");
+    for payload in [&b"first message, compressible, first message"[..], b"and a second one"] {
+        let wire = Peer::new(9).send(payload);
+        assert_eq!(
+            decoder.decompress(&wire, true, ROOMY).expect("an independent message decodes"),
+            payload
+        );
+    }
+}
+
 /// A decoder that remembers the smallest ceiling seen during a message honours
 /// every reduction, resets on final, and passes every other row in this file --
 /// while illegally rejecting a host that raises its capacity mid-message. The

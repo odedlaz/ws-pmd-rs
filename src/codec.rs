@@ -37,6 +37,15 @@ const SCRATCH: usize = 4096;
 /// inflate at 8 is not a question this crate can ask through flate2.
 const MIN_INFLATER_WINDOW_BITS: u8 = 9;
 
+/// The width `Decompress::reset` reinitialises at, whatever the stream was
+/// built with.
+///
+/// `reset` takes no window bits: zlib-rs rebuilds from
+/// `InflateConfig::default()` and the C backend passes
+/// `±MZ_DEFAULT_WINDOW_BITS` to `inflateReset2`. Both are 15, so a reset keeps
+/// the negotiated window at exactly this width and discards it at every other.
+const DEFAULT_INFLATER_WINDOW_BITS: u8 = 15;
+
 /// A finite ceiling on the decompressed bytes one message may produce.
 ///
 /// This bounds one quantity: the bytes a message has accumulated across all of
@@ -63,13 +72,16 @@ impl DecompressedLimit {
 /// Everything the inflater is built from, kept so that rebuilding it is the
 /// same operation as building it.
 ///
-/// `flate2` offers no way to reset an inflater to the width it was constructed
-/// with. `Decompress::reset` takes only `zlib_header`, and the C backend spells
-/// out what that costs -- `inflateReset2(stream, ±MZ_DEFAULT_WINDOW_BITS)`,
-/// which is 15 whatever the stream was made with (`flate2-1.1.9/src/ffi/c.rs`).
-/// zlib-rs rebuilds from its own default the same way. So a negotiated narrow
-/// window survived exactly until the first reset, and this crate exists to
-/// bound per-connection memory.
+/// `flate2` offers no width-preserving reset below 15, so a narrower negotiated
+/// window survives exactly until the first reinitialisation unless this crate
+/// rebuilds from what it stored.
+///
+/// What the width buys is backend-dependent, and both arms are measured. zlib-rs
+/// sizes its window `1 << MAX_WBITS` whatever it is told, so the declared width
+/// changes neither decoding nor allocation there. C zlib sizes it `1 << wbits`
+/// at first use, so the width both bounds memory -- 512 bytes against 32 KiB --
+/// and is enforced while decoding, where a back-reference past it fails the
+/// stream. Cargo features are additive, so a downstream graph selects which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InflaterConfig {
     zlib_header: bool,
@@ -93,6 +105,37 @@ impl InflaterConfig {
     /// The only place this crate constructs an inflater.
     fn build(self) -> Decompress {
         Decompress::new_with_window_bits(self.zlib_header, self.window_bits)
+    }
+
+    /// Whether `Decompress::reset` reinitialises at this configuration's own
+    /// width, which is the only case where it may be used.
+    const fn resets_in_place(self) -> bool {
+        self.window_bits == DEFAULT_INFLATER_WINDOW_BITS
+    }
+
+    /// Start `inflater` over on a fresh message, keeping the negotiated window.
+    ///
+    /// `reset` preserves the width at the backend default and nowhere else, and
+    /// there it is the cheaper route on both backends: it allocates nothing,
+    /// where rebuilding takes a fresh allocation. Below that width rebuilding is
+    /// the only route that keeps the width, and on C zlib it is the cheaper one
+    /// too, because `reset` frees the narrow window and re-widens to 15 on next
+    /// use. flate2 offers no third route.
+    ///
+    /// Which of the two runs is unguarded: swapping them survives the whole
+    /// suite. `resets_in_place` is pinned, its use here is not, and nothing
+    /// downstream can see the difference -- the one instrument that can, counting
+    /// the global allocator, needs the `unsafe` this crate forbids.
+    fn reinitialise(self, inflater: &mut Decompress) {
+        if self.resets_in_place() {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "the one width where reset keeps the configuration, pinned by `the_reset_route_is_taken_only_where_it_preserves_the_width`"
+            )]
+            inflater.reset(self.zlib_header);
+        } else {
+            *inflater = self.build();
+        }
     }
 }
 
@@ -212,7 +255,7 @@ impl Decoder {
         if final_fragment {
             self.inflate(TRAILER, limit, output)?;
             if self.reset_between_messages {
-                self.inflater = self.config.build();
+                self.config.reinitialise(&mut self.inflater);
             }
         }
         Ok(())
@@ -227,55 +270,52 @@ impl Decoder {
         let mut scratch = [0u8; SCRATCH];
         loop {
             let produced_so_far = self.delivered.saturating_add(output.len());
-            let remaining = limit.0.saturating_sub(produced_so_far);
+            let allowance = limit.0.saturating_sub(produced_so_far);
             // The `+ 1` is the whole detector. Leaving room for exactly one byte
             // past the ceiling means the overrun is observed as it is produced
             // rather than after a full scratch buffer has been materialised, so
-            // a bomb is stopped during inflate. `remaining` saturates at zero:
+            // a bomb is stopped during inflate. `allowance` saturates at zero:
             // once the ceiling has fallen below what was already delivered, that
             // one byte is past the delivery, not past the ceiling.
-            let writable = remaining.saturating_add(1).min(scratch.len());
-            let before = (self.inflater.total_in(), self.inflater.total_out());
+            let writable = allowance.saturating_add(1).min(scratch.len());
             #[expect(
                 clippy::indexing_slicing,
                 reason = "`writable` is `min`-ed with `scratch.len()` where it is bound"
             )]
-            let status = self
-                .inflater
-                .decompress(input, &mut scratch[..writable], FlushDecompress::None)
-                .map_err(|_| CodecError::InvalidStream)?;
-            let consumed = advance(before.0, self.inflater.total_in(), input.len());
-            let produced = advance(before.1, self.inflater.total_out(), writable);
+            let step = step(&mut self.inflater, input, &mut scratch[..writable])?;
 
             #[expect(
                 clippy::indexing_slicing,
-                reason = "`advance` clamps to `writable`, itself within scratch.len()"
+                reason = "`step` clamps `produced` to the scratch it was handed"
             )]
-            output.extend_from_slice(&scratch[..produced]);
+            output.extend_from_slice(&scratch[..step.produced]);
             let size = self.delivered.saturating_add(output.len());
             if size > limit.0 {
                 return Err(CodecError::MessageTooLong { size, limit: limit.0 });
             }
-            #[expect(
-                clippy::indexing_slicing,
-                reason = "`advance` clamps to the `input.len()` it was handed"
-            )]
-            let unconsumed = &input[consumed..];
-            input = unconsumed;
-
-            if status == Status::StreamEnd {
+            if step.stream_ended {
                 // The peer flushed with BFINAL set, which ends the DEFLATE
                 // stream (RFC 7692 section 7.2.3.4 permits this). A peer that
                 // does it must start a new stream, which cannot reference the
                 // old window, so resetting mirrors it. Without this the inflater
                 // stays finished and every later message decodes to nothing.
-                self.inflater = self.config.build();
+                self.config.reinitialise(&mut self.inflater);
             }
-            if !progress(consumed, produced, !input.is_empty())? {
-                return Ok(());
+            match step.remaining {
+                Some(rest) => input = rest,
+                None => return Ok(()),
             }
         }
     }
+}
+
+/// What one backend call did, derived from the slice that call was handed.
+struct Step<'a> {
+    produced: usize,
+    /// What is left of the input, or `None` once the backend has stopped moving
+    /// and there is nothing left to feed it.
+    remaining: Option<&'a [u8]>,
+    stream_ended: bool,
 }
 
 /// One backend call moves its `total_*` counter by at most the length of the
@@ -285,84 +325,148 @@ fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
     usize::try_from(after.saturating_sub(before)).unwrap_or(buffer_len).min(buffer_len)
 }
 
-/// Whether the backend moved, given what it did and what is left to give it.
+/// Drive the backend once, and read the outcome off the slice it was given.
 ///
-/// Keyed on residual input, not on the status, because no status answers the
-/// question. `Ok` is permitted when more input is unavailable, so treating it
-/// as a stall can fail a conforming backend; and neither `BufError` nor
-/// `StreamEnd` proves the slice was drained, so treating them as ordinary
-/// termination can drop a tail in silence. What distinguishes a stall from an
-/// exit is whether there was anything left for the call to work on.
-const fn progress(
-    consumed: usize,
-    produced: usize,
-    input_remains: bool,
-) -> Result<bool, CodecError> {
-    if consumed != 0 || produced != 0 {
-        return Ok(true);
-    }
-    if input_remains {
+/// The input arrives here once and goes straight to `decompress`, so the
+/// residual and the stall verdict come from the same bytes the backend saw. The
+/// caller gets a transition rather than the operands to recompute one from, and
+/// has no second slice or flag it could pass inconsistently.
+///
+/// A stall is zero progress with input still to read, keyed on the residual and
+/// not on the status, because no status answers the question. `Ok` is permitted
+/// when more input is unavailable, so treating it as a stall can fail a
+/// conforming backend; and neither `BufError` nor `StreamEnd` proves the slice
+/// was drained, so treating them as ordinary termination can drop a tail in
+/// silence.
+fn step<'a>(
+    inflater: &mut Decompress,
+    input: &'a [u8],
+    scratch: &mut [u8],
+) -> Result<Step<'a>, CodecError> {
+    let before = (inflater.total_in(), inflater.total_out());
+    let status = inflater
+        .decompress(input, scratch, FlushDecompress::None)
+        .map_err(|_| CodecError::InvalidStream)?;
+    let consumed = advance(before.0, inflater.total_in(), input.len());
+    let produced = advance(before.1, inflater.total_out(), scratch.len());
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "`advance` clamps to the `input.len()` it was handed"
+    )]
+    let unconsumed = &input[consumed..];
+    let remaining = if consumed != 0 || produced != 0 {
+        Some(unconsumed)
+    } else if unconsumed.is_empty() {
+        None
+    } else {
         return Err(CodecError::Stalled);
-    }
-    Ok(false)
+    };
+    Ok(Step { produced, remaining, stream_ended: status == Status::StreamEnd })
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, reason = "a panic is how a test reports")]
+#[expect(clippy::panic, clippy::expect_used, reason = "a panic is how a test reports")]
 mod tests {
-    use super::{advance, progress, CodecError, InflaterConfig};
+    use flate2::{Compress, Compression, FlushCompress};
+
+    use super::{advance, step, CodecError, InflaterConfig, DEFAULT_INFLATER_WINDOW_BITS};
     use crate::negotiated::{Negotiated, Role};
 
-    /// Exhaustive over the four `(consumed == 0, produced == 0)` classes
-    /// against both residual states. Three progress shapes is not the whole
-    /// space -- both-nonzero is its own class, and `|| -> ^` in the guard is a
-    /// natural mutation that only it can see from here.
+    /// A raw DEFLATE stream ending in BFINAL, from an independent compressor.
+    fn raw_deflate(plain: &[u8]) -> Vec<u8> {
+        let mut compressor = Compress::new_with_window_bits(Compression::default(), false, 15);
+        let mut wire = vec![0u8; plain.len() + 64];
+        compressor.compress(plain, &mut wire, FlushCompress::Finish).expect("one buffer is enough");
+        wire.truncate(usize::try_from(compressor.total_out()).expect("smaller than the buffer"));
+        wire
+    }
+
+    /// The transition one backend call produces, including the one class no
+    /// driven row reaches.
     ///
-    /// The division of labour with the driven suite is real and goes both ways.
-    /// **The table owns zero progress with input remaining**, because no row
-    /// reaches it: every zero-progress point in the suite is drained, so a
-    /// deleted guard makes the codec spin -- and `cargo test` has no per-test
-    /// timeout, so the row that should go red never returns -- while forcing
-    /// the residual false drops a tail with every row still green. **The suite
-    /// owns both-nonzero**, which four codec rows catch and which this table
-    /// only spot-checks. Neither instrument covers the space alone.
+    /// Zero progress with input still to read cannot happen through the codec:
+    /// production always leaves room for at least one byte, so every
+    /// zero-progress point in the suite is drained. A zero-length scratch
+    /// reaches it here through the real backend rather than a stubbed one. It
+    /// has to be reached somewhere -- a deleted stall guard makes the codec
+    /// spin, and `cargo test` has no per-test timeout, so the row that should
+    /// go red never returns at all.
     #[test]
-    fn a_stall_is_zero_progress_with_input_still_to_read() {
-        for (consumed, produced, input_remains, expected) in [
-            (0, 0, false, Some(false)),
-            (0, 0, true, None),
-            (1, 0, false, Some(true)),
-            (1, 0, true, Some(true)),
-            (0, 1, false, Some(true)),
-            (0, 1, true, Some(true)),
-            (1, 1, false, Some(true)),
-            (1, 1, true, Some(true)),
-        ] {
-            let got = progress(consumed, produced, input_remains);
-            match (got, expected) {
-                (Ok(got), Some(want)) => {
-                    assert_eq!(got, want, "progress({consumed}, {produced}, {input_remains})");
-                }
-                (Err(CodecError::Stalled), None) => {}
-                (got, want) => panic!(
-                    "progress({consumed}, {produced}, {input_remains}) gave {got:?}, wanted {want:?}"
-                ),
+    fn a_step_stalls_only_with_input_still_to_read() {
+        let wire = raw_deflate(b"hello, hello, hello");
+        let mut scratch = [0u8; 64];
+
+        let mut inflater = InflaterConfig::for_peer_window(15).build();
+        let decoded = step(&mut inflater, &wire, &mut scratch).expect("a whole message decodes");
+        assert!(decoded.produced > 0, "the call moved");
+        assert_eq!(decoded.remaining, Some(&[][..]), "drained, but the call moved");
+        assert!(decoded.stream_ended, "the wire ends with BFINAL");
+
+        let idle = step(&mut inflater, &[], &mut scratch).expect("an idle call is not a stall");
+        assert_eq!(idle.produced, 0);
+        assert!(idle.remaining.is_none(), "nothing left to feed it, so the loop must exit");
+
+        // A zero-length scratch does not stall the backend on the first call --
+        // it consumes header bytes without producing any -- so drive it until it
+        // cannot move at all. The residual shrinks whenever it consumes, and
+        // zero progress with input left is the error, so this terminates either
+        // way rather than spinning.
+        let long = raw_deflate(&b"stall me, stall me, stall me, ".repeat(256));
+        let mut starved = InflaterConfig::for_peer_window(15).build();
+        let mut unread = &long[..];
+        let outcome = loop {
+            match step(&mut starved, unread, &mut []) {
+                Ok(moved) => match moved.remaining {
+                    Some(rest) if !rest.is_empty() => unread = rest,
+                    _ => break Ok(()),
+                },
+                Err(error) => break Err(error),
             }
+        };
+        assert_eq!(
+            outcome,
+            Err(CodecError::Stalled),
+            "input left and the backend cannot move: the tail would be dropped in silence"
+        );
+    }
+
+    /// Which reinitialisation route each negotiable width takes.
+    ///
+    /// `reset` keeps the negotiated window only where the configuration already
+    /// is the backend default, so exactly one width may take it. This pins the
+    /// predicate, which is why the `reset` call site names this row; it does not
+    /// pin `reinitialise` consulting it in the right direction, and nothing
+    /// reachable from here can.
+    #[test]
+    fn the_reset_route_is_taken_only_where_it_preserves_the_width() {
+        for peer in 8..=15u8 {
+            let config = InflaterConfig::for_peer_window(peer);
+            assert_eq!(
+                config.resets_in_place(),
+                config.window_bits == DEFAULT_INFLATER_WINDOW_BITS,
+                "peer {peer} built at {} bits",
+                config.window_bits
+            );
         }
+        assert!(InflaterConfig::for_peer_window(15).resets_in_place(), "15 resets");
+        assert!(!InflaterConfig::for_peer_window(14).resets_in_place(), "14 rebuilds");
+        assert!(!InflaterConfig::for_peer_window(8).resets_in_place(), "the 8-to-9 clamp rebuilds");
     }
 
     /// The arguments the production factory hands `flate2`, for every peer
     /// width both roles can negotiate.
     ///
     /// Read off the `Decoder` a real agreement built, not off a helper called
-    /// beside it, so a correct mapping next to a hardcoded call site cannot
-    /// pass. Both roles, because `peer_max_window_bits` reads the opposite
+    /// beside it. Both roles, because `peer_max_window_bits` reads the opposite
     /// stored field in each and a direction swap is otherwise invisible: with
     /// one role the two fields would only have to agree.
     ///
-    /// The width itself has no effect on decoding -- measured, on both backends
-    /// -- so nothing here can be a decode test. What it governs is allocation,
-    /// which is the job RFC 7692 section 7.1.2.2 gives the parameter.
+    /// This is a mapping and state seam, not a claim about the arguments
+    /// `flate2` receives. A literal substituted inside `build` still passes it,
+    /// and nothing downstream can see the difference: `Decompress` exposes no
+    /// width read-back, and on the pinned backend the width changes neither
+    /// decoding nor allocation. Those substitutions are unguarded and recorded
+    /// as such rather than described as covered.
     #[test]
     fn the_inflater_is_built_at_the_negotiated_peer_width_for_both_roles() {
         for peer in 8..=15u8 {

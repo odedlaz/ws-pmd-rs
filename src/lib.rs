@@ -1,0 +1,61 @@
+//! RFC 7692 `permessage-deflate`, independent of any WebSocket implementation.
+//!
+//! This crate owns two things: whether the extension was correctly negotiated,
+//! and the per-connection DEFLATE state that follows. It owns nothing else. It
+//! has no socket, no runtime, no frame type, and no opinion about masking,
+//! opcodes, close codes, UTF-8, or message assembly — those stay with the host.
+//!
+//! # Handshake
+//!
+//! Both roles are state machines whose types enforce their order, so a host
+//! cannot build compression state from anything but a finalized agreement.
+//!
+//! A client installs an offer, seals it against the request that is actually
+//! being sent, then applies the response:
+//!
+//! ```
+//! use http::HeaderMap;
+//! use permessage_deflate::{ClientConfig, ClientOffer};
+//!
+//! let mut request = HeaderMap::new();
+//! let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
+//!
+//! // The host finishes building the request, then seals at the send boundary.
+//! let handshake = offer.seal(&request)?;
+//!
+//! let mut response = HeaderMap::new();
+//! response.insert(
+//!     http::header::SEC_WEBSOCKET_EXTENSIONS,
+//!     "permessage-deflate; server_max_window_bits=12".parse().unwrap(),
+//! );
+//! let negotiated = handshake.finish(&response)?.expect("the server selected it");
+//! assert_eq!(negotiated.peer_max_window_bits(), 12);
+//! assert_eq!(negotiated.local_max_window_bits(), 15);
+//! # Ok::<(), permessage_deflate::NegotiationError>(())
+//! ```
+//!
+//! A server selects an alternative, hands the host the exact response element,
+//! and commits only once that element survived the host's own callbacks.
+//!
+//! # Windows
+//!
+//! RFC 7692 names its parameters after the server and the client. Which one is
+//! "this side" depends on the role, so [`Negotiated`] reports `local` and `peer`
+//! instead and keeps the mapping private. A peer window of 8 is legal and is
+//! reported as 8; only building an inflater raises it to 9, because zlib has no
+//! 8-bit inflater and a wider inflater accepts every stream a narrower
+//! compressor emits. A local compressor window is never 8 and never clamped: it
+//! is rejected where it is configured.
+
+mod client;
+mod config;
+mod error;
+mod grammar;
+mod negotiated;
+mod server;
+
+pub use client::{ClientHandshake, ClientOffer};
+pub use config::{ClientConfig, ServerConfig};
+pub use error::{ConfigError, NegotiationError};
+pub use negotiated::Negotiated;
+pub use server::ServerHandshake;

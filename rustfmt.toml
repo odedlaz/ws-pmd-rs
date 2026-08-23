@@ -1,0 +1,4 @@
+# Matches tungstenite-rs, so the extraction diff stays readable against the tree
+# this code came from. `imports_granularity` is deliberately not carried over:
+# it is nightly-only, and a published crate should format on stable.
+use_small_heuristics = "Max"

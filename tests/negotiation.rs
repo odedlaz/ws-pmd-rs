@@ -1,0 +1,488 @@
+//! The RFC 7692 negotiation matrix, driven through the public API only.
+
+use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+use permessage_deflate::{
+    ClientConfig, ClientOffer, ConfigError, Negotiated, NegotiationError, ServerConfig,
+    ServerHandshake,
+};
+
+fn headers(values: &[&[u8]]) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for value in values {
+        map.append(
+            SEC_WEBSOCKET_EXTENSIONS,
+            HeaderValue::from_bytes(value).expect("test input is a valid header value"),
+        );
+    }
+    map
+}
+
+/// Drive a client from a config through a response, skipping the seal by
+/// sealing against the request the offer itself installed.
+fn client_round_trip(
+    config: ClientConfig,
+    response: &[&[u8]],
+) -> Result<Option<Negotiated>, NegotiationError> {
+    let mut request = HeaderMap::new();
+    let offer = ClientOffer::install(config, &mut request).expect("a fresh map has no offer");
+    offer.seal(&request)?.finish(&headers(response))
+}
+
+fn offer_value(config: ClientConfig) -> String {
+    let mut request = HeaderMap::new();
+    let offer = ClientOffer::install(config, &mut request).expect("a fresh map has no offer");
+    offer.value().to_str().expect("the offer is ASCII").to_owned()
+}
+
+// ---------------------------------------------------------------- validate-parser
+
+#[test]
+fn accepts_a_quoted_window_value() {
+    let agreed = client_round_trip(
+        ClientConfig::new(),
+        &[br#"permessage-deflate; server_max_window_bits="12""#],
+    )
+    .expect("quoted values are legal")
+    .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 12);
+}
+
+#[test]
+fn resolves_a_quoted_pair_inside_a_window_value() {
+    // `"1\2"` is the quoted-pair spelling of `12`.
+    let agreed = client_round_trip(
+        ClientConfig::new(),
+        &[br#"permessage-deflate; server_max_window_bits="1\2""#],
+    )
+    .expect("quoted pairs are legal")
+    .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 12);
+}
+
+#[test]
+fn a_comma_inside_quotes_does_not_split_the_list() {
+    // Quote-unaware splitting cuts this into two elements and finds a
+    // `permessage-deflate` selection *inside* a quoted string the peer never
+    // made. There is one element here, and its name is not permessage-deflate.
+    let selected = client_round_trip(
+        ClientConfig::new(),
+        &[br#"x-other; note="a, permessage-deflate; server_max_window_bits=9""#],
+    )
+    .expect("one unrelated element parses cleanly");
+    assert!(selected.is_none(), "a quoted comma must not manufacture a selection");
+}
+
+#[test]
+fn an_unrelated_extension_may_carry_non_utf8_bytes() {
+    let agreed =
+        client_round_trip(ClientConfig::new(), &[b"x-binary; tag=\xff\xfe, permessage-deflate"])
+            .expect("only the permessage-deflate element is decoded")
+            .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 15);
+}
+
+#[test]
+fn an_unrelated_extension_may_use_every_token_character() {
+    let agreed = client_round_trip(
+        ClientConfig::new(),
+        &[br"x-!#$%&'*+-.^_`|~; weird=1, permessage-deflate"],
+    )
+    .expect("unrelated extensions are not validated")
+    .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 15);
+}
+
+#[test]
+fn extension_and_parameter_names_are_case_insensitive() {
+    let agreed = client_round_trip(
+        ClientConfig::new(),
+        &[b"PerMessage-DEFLATE; Server_No_Context_Takeover"],
+    )
+    .expect("HTTP tokens match case-insensitively")
+    .expect("the server selected it");
+    assert!(agreed.peer_no_context_takeover());
+}
+
+#[test]
+fn a_duplicate_parameter_is_rejected() {
+    let error = client_round_trip(
+        ClientConfig::new(),
+        &[b"permessage-deflate; server_max_window_bits=12; server_max_window_bits=12"],
+    )
+    .expect_err("a repeated parameter is ambiguous");
+    assert_eq!(error, NegotiationError::DuplicateParameter);
+}
+
+/// `strict-parser`, settled 2026-08-23: a value whose quoting never closes has
+/// no determinable element boundaries, so it errors rather than being answered.
+#[test]
+fn an_unterminated_quote_errors_rather_than_classifying() {
+    let error = client_round_trip(ClientConfig::new(), &[br#"permessage-deflate; x="open"#])
+        .expect_err("the element boundaries are unknowable");
+    assert_eq!(error, NegotiationError::MalformedHeader);
+}
+
+#[test]
+fn a_trailing_escape_errors() {
+    let error = client_round_trip(ClientConfig::new(), &[br#"permessage-deflate; x="a\"#])
+        .expect_err("the escape has nothing to escape");
+    assert_eq!(error, NegotiationError::MalformedHeader);
+}
+
+#[test]
+fn an_unterminated_quote_hides_no_deflate_offer_from_a_server() {
+    // The same input on the server side declines instead of erroring: refusing
+    // the whole upgrade over an extension header is a denial-of-service lever.
+    let request = headers(&[br#"permessage-deflate; x="open"#]);
+    assert!(ServerHandshake::accept(ServerConfig::new(), &request).is_none());
+}
+
+#[test]
+fn a_leading_zero_window_is_rejected() {
+    let error =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; server_max_window_bits=09"])
+            .expect_err("09 is not a wire form RFC 7692 defines");
+    assert_eq!(error, NegotiationError::InvalidWindowBits);
+}
+
+#[test]
+fn an_unknown_parameter_fails_the_client() {
+    let error =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; nonstandard_option=1"])
+            .expect_err("an unrecognised parameter cannot be agreed to");
+    assert_eq!(error, NegotiationError::UnknownParameter);
+}
+
+#[test]
+fn a_flag_parameter_may_not_carry_a_value() {
+    let error = client_round_trip(
+        ClientConfig::new(),
+        &[b"permessage-deflate; server_no_context_takeover=1"],
+    )
+    .expect_err("the takeover parameters are valueless");
+    assert_eq!(error, NegotiationError::ParameterArity);
+}
+
+// --------------------------------------------------------- validate-client-matrix
+
+#[test]
+fn the_default_offer_advertises_a_valueless_client_window() {
+    assert_eq!(offer_value(ClientConfig::new()), "permessage-deflate; client_max_window_bits");
+}
+
+#[test]
+fn a_bounded_offer_states_both_widths() {
+    let config = ClientConfig::new()
+        .server_no_context_takeover(true)
+        .client_no_context_takeover(true)
+        .server_max_window_bits(10)
+        .expect("10 is a legal peer bound")
+        .client_max_window_bits(11)
+        .expect("11 is a legal local bound");
+    assert_eq!(
+        offer_value(config),
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; \
+         server_max_window_bits=10; client_max_window_bits=11"
+    );
+}
+
+#[test]
+fn a_declining_response_is_not_an_error() {
+    assert!(client_round_trip(ClientConfig::new(), &[b"x-other"])
+        .expect("no PMD is legal")
+        .is_none());
+    assert!(client_round_trip(ClientConfig::new(), &[]).expect("no header is legal").is_none());
+}
+
+#[test]
+fn omitted_optional_parameters_agree_to_the_offered_bounds() {
+    let config = ClientConfig::new().client_max_window_bits(11).expect("legal");
+    let agreed = client_round_trip(config, &[b"permessage-deflate"])
+        .expect("a bare selection is legal")
+        .expect("the server selected it");
+    assert!(!agreed.local_no_context_takeover());
+    assert!(!agreed.peer_no_context_takeover());
+    assert_eq!(agreed.peer_max_window_bits(), 15);
+    // Unanswered means unconstrained by the server, so this side still holds
+    // itself to the width it advertised.
+    assert_eq!(agreed.local_max_window_bits(), 11);
+}
+
+/// The historical `|=`-to-`=` mutant: a server may impose a takeover limit the
+/// client never volunteered, and the agreement must be the union.
+#[test]
+fn a_server_may_impose_client_no_context_takeover() {
+    let agreed = client_round_trip(
+        ClientConfig::new(),
+        &[b"permessage-deflate; client_no_context_takeover"],
+    )
+    .expect("a stronger response is legal")
+    .expect("the server selected it");
+    assert!(agreed.local_no_context_takeover());
+}
+
+#[test]
+fn an_offered_client_takeover_survives_a_silent_response() {
+    let config = ClientConfig::new().client_no_context_takeover(true);
+    let agreed = client_round_trip(config, &[b"permessage-deflate"])
+        .expect("legal")
+        .expect("the server selected it");
+    assert!(agreed.local_no_context_takeover());
+}
+
+#[test]
+fn a_required_server_takeover_must_be_confirmed() {
+    let config = ClientConfig::new().server_no_context_takeover(true);
+    let error = client_round_trip(config, &[b"permessage-deflate"])
+        .expect_err("the requirement was not echoed");
+    assert_eq!(error, NegotiationError::ServerTakeoverNotHonoured);
+}
+
+#[test]
+fn a_bounded_server_window_must_be_confirmed() {
+    let config = ClientConfig::new().server_max_window_bits(10).expect("legal");
+    let error =
+        client_round_trip(config, &[b"permessage-deflate"]).expect_err("the bound was not echoed");
+    assert_eq!(error, NegotiationError::ServerWindowUnconfirmed);
+}
+
+#[test]
+fn a_widened_server_window_is_rejected() {
+    let config = ClientConfig::new().server_max_window_bits(10).expect("legal");
+    let error = client_round_trip(config, &[b"permessage-deflate; server_max_window_bits=12"])
+        .expect_err("12 exceeds the offered 10");
+    assert_eq!(error, NegotiationError::ServerWindowTooLarge);
+}
+
+#[test]
+fn an_unoffered_client_window_is_rejected() {
+    let config = ClientConfig::new().client_max_window_bits(10).expect("legal");
+    let error = client_round_trip(config, &[b"permessage-deflate; client_max_window_bits=12"])
+        .expect_err("12 exceeds the offered 10");
+    assert_eq!(error, NegotiationError::ClientWindowNotOffered);
+}
+
+#[test]
+fn a_client_window_below_the_buildable_floor_is_rejected() {
+    let error =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; client_max_window_bits=8"])
+            .expect_err("no local compressor can be built at 8");
+    assert_eq!(error, NegotiationError::ClientWindowNotOffered);
+}
+
+#[test]
+fn a_valueless_client_window_in_a_response_is_rejected() {
+    let error =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; client_max_window_bits"])
+            .expect_err("a response must state the chosen width");
+    assert_eq!(error, NegotiationError::ClientWindowValueless);
+}
+
+#[test]
+fn a_peer_window_of_eight_is_kept_as_eight() {
+    let agreed =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; server_max_window_bits=8"])
+            .expect("8 is legal for the peer's compressor")
+            .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 8);
+}
+
+#[test]
+fn two_selections_are_rejected_across_one_line_and_across_two() {
+    let one_line =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate, permessage-deflate"])
+            .expect_err("one selection only");
+    assert_eq!(one_line, NegotiationError::DuplicateExtension);
+
+    let two_lines =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate", b"permessage-deflate"])
+            .expect_err("separate field lines are still one list");
+    assert_eq!(two_lines, NegotiationError::DuplicateExtension);
+}
+
+#[test]
+fn a_selection_is_found_on_a_later_header_line() {
+    let agreed = client_round_trip(ClientConfig::new(), &[b"x-other", b"permessage-deflate"])
+        .expect("legal")
+        .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 15);
+}
+
+// ------------------------------------------------------------------ the seal
+
+#[test]
+fn installing_over_a_caller_owned_offer_is_a_collision() {
+    let mut request = headers(&[b"permessage-deflate"]);
+    let error = ClientOffer::install(ClientConfig::new(), &mut request)
+        .expect_err("two owners of one extension");
+    assert_eq!(error, NegotiationError::OfferCollision);
+}
+
+#[test]
+fn sealing_detects_removal_replacement_and_duplication() {
+    for (name, final_request) in [
+        ("removed", headers(&[])),
+        ("replaced", headers(&[b"permessage-deflate; server_max_window_bits=9"])),
+        (
+            "duplicated",
+            headers(&[b"permessage-deflate; client_max_window_bits", b"permessage-deflate"]),
+        ),
+    ] {
+        let mut request = HeaderMap::new();
+        let offer = ClientOffer::install(ClientConfig::new(), &mut request).expect("fresh");
+        let error = offer.seal(&final_request).expect_err(name);
+        assert_eq!(error, NegotiationError::OfferAltered, "{name}");
+    }
+}
+
+#[test]
+fn sealing_accepts_the_offer_beside_an_unrelated_extension() {
+    let mut request = HeaderMap::new();
+    let offer = ClientOffer::install(ClientConfig::new(), &mut request).expect("fresh");
+    request.append(SEC_WEBSOCKET_EXTENSIONS, HeaderValue::from_static("x-other; a=1"));
+    offer.seal(&request).expect("an unrelated extension does not disturb the offer");
+}
+
+// --------------------------------------------------------- validate-server-matrix
+
+fn server_select(config: ServerConfig, request: &[&[u8]]) -> Option<(String, Negotiated)> {
+    let handshake = ServerHandshake::accept(config, &headers(request))?;
+    let proposed = handshake.value().to_str().expect("ASCII").to_owned();
+    let response = headers(&[proposed.as_bytes()]);
+    let agreed = handshake.finish(&response).expect("the proposal is unchanged");
+    Some((proposed, agreed.expect("the proposal selected it")))
+}
+
+#[test]
+fn the_server_takes_the_first_acceptable_alternative() {
+    // The first demands an 8-bit server compressor, which cannot be built.
+    let (proposed, agreed) = server_select(
+        ServerConfig::new(),
+        &[b"permessage-deflate; server_max_window_bits=8, permessage-deflate; server_max_window_bits=12"],
+    )
+    .expect("the second alternative is supportable");
+    assert_eq!(proposed, "permessage-deflate; server_max_window_bits=12");
+    assert_eq!(agreed.local_max_window_bits(), 12);
+}
+
+#[test]
+fn the_server_declines_a_local_window_of_eight() {
+    assert!(server_select(ServerConfig::new(), &[b"permessage-deflate; server_max_window_bits=8"])
+        .is_none());
+}
+
+#[test]
+fn the_server_accepts_a_peer_window_of_eight() {
+    let (proposed, agreed) =
+        server_select(ServerConfig::new(), &[b"permessage-deflate; client_max_window_bits=8"])
+            .expect("8 is legal for the peer's compressor");
+    assert_eq!(proposed, "permessage-deflate; client_max_window_bits=8");
+    assert_eq!(agreed.peer_max_window_bits(), 8);
+}
+
+#[test]
+fn the_server_declines_an_unknown_parameter_and_takes_the_next() {
+    let (proposed, _) = server_select(
+        ServerConfig::new(),
+        &[b"permessage-deflate; nonstandard=1, permessage-deflate"],
+    )
+    .expect("the second alternative is clean");
+    assert_eq!(proposed, "permessage-deflate");
+}
+
+#[test]
+fn the_server_declines_a_request_with_no_offer() {
+    assert!(server_select(ServerConfig::new(), &[b"x-other"]).is_none());
+    assert!(server_select(ServerConfig::new(), &[]).is_none());
+}
+
+#[test]
+fn the_server_cannot_bound_a_client_window_the_offer_never_invited() {
+    let config = ServerConfig::new().client_max_window_bits(10).expect("legal");
+    assert!(server_select(config, &[b"permessage-deflate"]).is_none());
+}
+
+#[test]
+fn a_valueless_client_window_lets_the_server_choose() {
+    let config = ServerConfig::new().client_max_window_bits(10).expect("legal");
+    let (proposed, agreed) =
+        server_select(config, &[b"permessage-deflate; client_max_window_bits"])
+            .expect("the offer invited a bound");
+    assert_eq!(proposed, "permessage-deflate; client_max_window_bits=10");
+    assert_eq!(agreed.peer_max_window_bits(), 10);
+}
+
+#[test]
+fn the_server_imposes_its_own_takeover_policy() {
+    let config = ServerConfig::new().client_no_context_takeover(true);
+    let (proposed, agreed) = server_select(config, &[b"permessage-deflate"]).expect("legal");
+    assert_eq!(proposed, "permessage-deflate; client_no_context_takeover");
+    assert!(agreed.peer_no_context_takeover());
+}
+
+#[test]
+fn a_removed_response_extension_yields_no_agreement() {
+    let handshake =
+        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("selected");
+    assert!(handshake.finish(&headers(&[])).expect("removal is allowed").is_none());
+}
+
+#[test]
+fn a_rewritten_response_is_rejected_even_when_the_offers_permit_it() {
+    // Both widths are supportable against this offer; the server proposed 15.
+    let handshake = ServerHandshake::accept(
+        ServerConfig::new(),
+        &headers(&[b"permessage-deflate; client_max_window_bits"]),
+    )
+    .expect("selected");
+    let error = handshake
+        .finish(&headers(&[b"permessage-deflate; client_max_window_bits=10"]))
+        .expect_err("the header and the runtime state commit together");
+    assert_eq!(error, NegotiationError::ResponseAltered);
+}
+
+#[test]
+fn a_duplicated_response_extension_is_rejected() {
+    let handshake =
+        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("selected");
+    let error = handshake
+        .finish(&headers(&[b"permessage-deflate", b"permessage-deflate"]))
+        .expect_err("one selection only");
+    assert_eq!(error, NegotiationError::ResponseAltered);
+}
+
+// ---------------------------------------------------------------- configuration
+
+#[test]
+fn local_compressor_windows_are_validated_not_clamped() {
+    for bits in [0, 7, 8, 16, 255] {
+        assert_eq!(
+            ClientConfig::new().client_max_window_bits(bits).unwrap_err(),
+            ConfigError::WindowBits,
+            "client local window {bits}"
+        );
+        assert_eq!(
+            ServerConfig::new().server_max_window_bits(bits).unwrap_err(),
+            ConfigError::WindowBits,
+            "server local window {bits}"
+        );
+    }
+    for bits in 9..=15 {
+        assert!(ClientConfig::new().client_max_window_bits(bits).is_ok());
+        assert!(ServerConfig::new().server_max_window_bits(bits).is_ok());
+    }
+}
+
+#[test]
+fn peer_windows_admit_eight() {
+    assert!(ClientConfig::new().server_max_window_bits(8).is_ok());
+    assert!(ServerConfig::new().client_max_window_bits(8).is_ok());
+    for bits in [0, 7, 16, 255] {
+        assert_eq!(
+            ClientConfig::new().server_max_window_bits(bits).unwrap_err(),
+            ConfigError::PeerWindowBits
+        );
+    }
+}

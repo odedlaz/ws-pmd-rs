@@ -69,6 +69,12 @@ pub enum NegotiationError {
     /// the selection handed to the host. Version 0.1 permits the exact proposal
     /// or removal, and nothing between.
     ResponseAltered,
+
+    /// `permessage-deflate` was selected alongside an extension the host says it
+    /// cannot compose with under RFC 7692 section 5. The host attests to this at
+    /// the same boundary that commits the response, so a conflicting set fails
+    /// before any codec exists rather than at the first compressed frame.
+    ExtensionConflict,
 }
 
 impl fmt::Display for NegotiationError {
@@ -94,6 +100,9 @@ impl fmt::Display for NegotiationError {
             Self::OfferCollision => "the request already carries a permessage-deflate offer",
             Self::OfferAltered => "the final request does not carry the installed offer",
             Self::ResponseAltered => "the final response is not the proposed selection",
+            Self::ExtensionConflict => {
+                "a selected extension does not compose with permessage-deflate"
+            }
         };
         formatter.write_str(message)
     }

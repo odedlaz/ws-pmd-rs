@@ -2,8 +2,8 @@
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
-    ClientConfig, ClientOffer, ConfigError, Negotiated, NegotiationError, ServerConfig,
-    ServerHandshake,
+    ClientConfig, ClientOffer, ConfigError, Negotiated, NegotiationError, PmdComposition,
+    ServerConfig, ServerHandshake,
 };
 
 fn headers(values: &[&[u8]]) -> HeaderMap {
@@ -23,9 +23,17 @@ fn client_round_trip(
     config: ClientConfig,
     response: &[&[u8]],
 ) -> Result<Option<Negotiated>, NegotiationError> {
+    client_round_trip_composing(config, response, PmdComposition::Compatible)
+}
+
+fn client_round_trip_composing(
+    config: ClientConfig,
+    response: &[&[u8]],
+    composition: PmdComposition,
+) -> Result<Option<Negotiated>, NegotiationError> {
     let mut request = HeaderMap::new();
     let offer = ClientOffer::install(config, &mut request).expect("a fresh map has no offer");
-    offer.seal(&request)?.finish(&headers(response))
+    offer.seal(&request)?.finish(&headers(response), composition)
 }
 
 fn offer_value(config: ClientConfig) -> String {
@@ -349,7 +357,8 @@ fn server_select(config: ServerConfig, request: &[&[u8]]) -> Option<(String, Neg
     let handshake = ServerHandshake::accept(config, &headers(request))?;
     let proposed = handshake.value().to_str().expect("ASCII").to_owned();
     let response = headers(&[proposed.as_bytes()]);
-    let agreed = handshake.finish(&response).expect("the proposal is unchanged");
+    let agreed =
+        handshake.finish(&response, PmdComposition::Compatible).expect("the proposal is unchanged");
     Some((proposed, agreed.expect("the proposal selected it")))
 }
 
@@ -425,7 +434,10 @@ fn a_removed_response_extension_yields_no_agreement() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
             .expect("selected");
-    assert!(handshake.finish(&headers(&[])).expect("removal is allowed").is_none());
+    assert!(handshake
+        .finish(&headers(&[]), PmdComposition::Compatible)
+        .expect("removal is allowed")
+        .is_none());
 }
 
 #[test]
@@ -437,7 +449,10 @@ fn a_rewritten_response_is_rejected_even_when_the_offers_permit_it() {
     )
     .expect("selected");
     let error = handshake
-        .finish(&headers(&[b"permessage-deflate; client_max_window_bits=10"]))
+        .finish(
+            &headers(&[b"permessage-deflate; client_max_window_bits=10"]),
+            PmdComposition::Compatible,
+        )
         .expect_err("the header and the runtime state commit together");
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
@@ -448,7 +463,10 @@ fn a_duplicated_response_extension_is_rejected() {
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
             .expect("selected");
     let error = handshake
-        .finish(&headers(&[b"permessage-deflate", b"permessage-deflate"]))
+        .finish(
+            &headers(&[b"permessage-deflate", b"permessage-deflate"]),
+            PmdComposition::Compatible,
+        )
         .expect_err("one selection only");
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
@@ -485,4 +503,83 @@ fn peer_windows_admit_eight() {
             ConfigError::PeerWindowBits
         );
     }
+}
+
+// ------------------------------------------------------ validate-composition
+
+/// The attestation gates the agreement, so the interesting rows are the two
+/// where PMD was actually selected and the two where it was not: a conflict only
+/// means something when there is a compressed stream for it to be about.
+#[test]
+fn a_conflicting_extension_set_produces_no_client_agreement() {
+    let error = client_round_trip_composing(
+        ClientConfig::new(),
+        &[b"permessage-deflate"],
+        PmdComposition::Conflict,
+    )
+    .expect_err("a conflicting set must not agree");
+    assert_eq!(error, NegotiationError::ExtensionConflict);
+}
+
+#[test]
+fn a_conflicting_extension_set_produces_no_server_agreement() {
+    let handshake =
+        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("selected");
+    let error = handshake
+        .finish(&headers(&[b"permessage-deflate"]), PmdComposition::Conflict)
+        .expect_err("a conflicting set must not agree");
+    assert_eq!(error, NegotiationError::ExtensionConflict);
+}
+
+#[test]
+fn composition_is_irrelevant_when_the_server_declined() {
+    let agreed = client_round_trip_composing(ClientConfig::new(), &[], PmdComposition::Conflict)
+        .expect("a declined extension cannot conflict with anything");
+    assert!(agreed.is_none());
+}
+
+#[test]
+fn composition_is_irrelevant_when_the_response_dropped_the_selection() {
+    let handshake =
+        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("selected");
+    let agreed = handshake
+        .finish(&headers(&[]), PmdComposition::Conflict)
+        .expect("removing the selection is how a host declines a conflicting set");
+    assert!(agreed.is_none());
+}
+
+/// A duplicated selection is caught by counting, which happens after the loop,
+/// so this is the row that pins the order of the arms rather than an early
+/// return. Without it the conflict check can widen to every count and still look
+/// correct: the removal row is decided by an earlier arm and cannot see it.
+#[test]
+fn a_duplicated_response_outranks_a_composition_conflict() {
+    let handshake =
+        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("selected");
+    let error = handshake
+        .finish(&headers(&[b"permessage-deflate", b"permessage-deflate"]), PmdComposition::Conflict)
+        .expect_err("both faults are present");
+    assert_eq!(error, NegotiationError::ResponseAltered);
+}
+
+/// A rewritten response is a host bug about the response, and a conflicting set
+/// is a host bug about the extension list. Both are fatal; this pins which one
+/// is reported so the host is told what it actually got wrong.
+#[test]
+fn a_rewritten_response_outranks_a_composition_conflict() {
+    let handshake = ServerHandshake::accept(
+        ServerConfig::new(),
+        &headers(&[b"permessage-deflate; client_max_window_bits"]),
+    )
+    .expect("selected");
+    let error = handshake
+        .finish(
+            &headers(&[b"permessage-deflate; client_max_window_bits=10"]),
+            PmdComposition::Conflict,
+        )
+        .expect_err("both faults are present");
+    assert_eq!(error, NegotiationError::ResponseAltered);
 }

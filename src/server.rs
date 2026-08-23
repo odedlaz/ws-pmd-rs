@@ -10,7 +10,7 @@ use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use crate::config::ServerConfig;
 use crate::error::NegotiationError;
 use crate::grammar::{self, ClientWindow, Params};
-use crate::negotiated::{render, ClientBits, Negotiated, Role};
+use crate::negotiated::{render, ClientBits, Negotiated, PmdComposition, Role};
 
 const MAX_WINDOW_BITS: u8 = 15;
 
@@ -65,7 +65,16 @@ impl ServerHandshake {
     /// version 0.1 commits the header and the runtime state together, so a
     /// rewritten response — even to another selection these offers permit —
     /// would leave codecs configured for a wire contract nobody sent.
-    pub fn finish(self, headers: &HeaderMap) -> Result<Option<Negotiated>, NegotiationError> {
+    ///
+    /// A server that wants to decline a conflicting extension set cleanly
+    /// removes `permessage-deflate` from the response first, which is the
+    /// ordinary removal path. Passing [`PmdComposition::Conflict`] with the
+    /// selection still in place is a bug in the host, and it aborts.
+    pub fn finish(
+        self,
+        headers: &HeaderMap,
+        composition: PmdComposition,
+    ) -> Result<Option<Negotiated>, NegotiationError> {
         let mut found = 0usize;
         for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
             for element in grammar::elements(value.as_bytes())? {
@@ -80,6 +89,9 @@ impl ServerHandshake {
         }
         match found {
             0 => Ok(None),
+            1 if composition == PmdComposition::Conflict => {
+                Err(NegotiationError::ExtensionConflict)
+            }
             1 => Ok(Some(self.agreement)),
             _ => Err(NegotiationError::ResponseAltered),
         }

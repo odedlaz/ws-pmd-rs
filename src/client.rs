@@ -13,7 +13,7 @@ use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use crate::config::ClientConfig;
 use crate::error::NegotiationError;
 use crate::grammar::{self, ClientWindow, Params};
-use crate::negotiated::{render, ClientBits, Negotiated, Role};
+use crate::negotiated::{render, ClientBits, Negotiated, PmdComposition, Role};
 
 /// The widest window, which is also the value an offer omits.
 const MAX_WINDOW_BITS: u8 = 15;
@@ -93,11 +93,20 @@ impl ClientHandshake {
     /// Apply the response to the sealed offer.
     ///
     /// Returns `None` when the server declined the extension, which is a normal
-    /// outcome and not an error.
-    pub fn finish(self, headers: &HeaderMap) -> Result<Option<Negotiated>, NegotiationError> {
+    /// outcome and not an error. `composition` is only consulted once the server
+    /// has actually selected `permessage-deflate`: a connection that ended up
+    /// without it has nothing to compose.
+    pub fn finish(
+        self,
+        headers: &HeaderMap,
+        composition: PmdComposition,
+    ) -> Result<Option<Negotiated>, NegotiationError> {
         let Some(params) = sole_deflate(headers)? else {
             return Ok(None);
         };
+        if composition == PmdComposition::Conflict {
+            return Err(NegotiationError::ExtensionConflict);
+        }
         self.agree(params).map(Some)
     }
 

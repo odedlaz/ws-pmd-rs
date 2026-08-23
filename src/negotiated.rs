@@ -16,6 +16,29 @@ pub(crate) enum Role {
     Server,
 }
 
+/// Whether every other extension this connection selected can compose with
+/// `permessage-deflate`.
+///
+/// `Compatible` asserts one fact about the connection's **final selected**
+/// extension set — not what was offered: every other selected extension is
+/// composition-compatible with `permessage-deflate` under RFC 7692 section 5.
+/// None conflicts on RSV1, and no extension whose output feeds
+/// `permessage-deflate` requires preserved frame boundaries or uses Extension
+/// data or reserved bits as per-frame attributes.
+///
+/// The crate cannot check this itself: RFC 7692 forbids orderings across
+/// extensions it has no way to see, and reading them would need the extension
+/// registry version 0.1 deliberately does not have. So the host states the fact
+/// and the type system forces it to. A required argument is the whole mechanism
+/// — a token this crate handed out would be forgeable and would prove no more.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PmdComposition {
+    /// No other selected extension conflicts with `permessage-deflate`.
+    Compatible,
+    /// Some other selected extension does. No agreement may be produced.
+    Conflict,
+}
+
 /// A settled `permessage-deflate` agreement.
 ///
 /// Holds settings, not compression state: it is cheap to copy and allocates

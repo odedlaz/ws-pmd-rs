@@ -15,7 +15,7 @@
 //!
 //! ```
 //! use http::HeaderMap;
-//! use permessage_deflate::{ClientConfig, ClientOffer};
+//! use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
 //!
 //! let mut request = HeaderMap::new();
 //! let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
@@ -28,7 +28,11 @@
 //!     http::header::SEC_WEBSOCKET_EXTENSIONS,
 //!     "permessage-deflate; server_max_window_bits=12".parse().unwrap(),
 //! );
-//! let negotiated = handshake.finish(&response)?.expect("the server selected it");
+//! // The host states, from its own final selected extension set, that nothing
+//! // else on this connection conflicts with permessage-deflate.
+//! let negotiated = handshake
+//!     .finish(&response, PmdComposition::Compatible)?
+//!     .expect("the server selected it");
 //! assert_eq!(negotiated.peer_max_window_bits(), 12);
 //! assert_eq!(negotiated.local_max_window_bits(), 15);
 //! # Ok::<(), permessage_deflate::NegotiationError>(())
@@ -57,5 +61,5 @@ mod server;
 pub use client::{ClientHandshake, ClientOffer};
 pub use config::{ClientConfig, ServerConfig};
 pub use error::{ConfigError, NegotiationError};
-pub use negotiated::Negotiated;
+pub use negotiated::{Negotiated, PmdComposition};
 pub use server::ServerHandshake;

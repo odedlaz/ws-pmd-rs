@@ -126,19 +126,18 @@ impl InflaterConfig {
     /// too, because `reset` frees the narrow window and re-widens to 15 on next
     /// use. flate2 offers no third route.
     ///
-    /// Which of the two runs is unguarded, and the reason is backend-dependence
-    /// rather than impossibility. `resets_in_place` is pinned; its use here is
-    /// not, and swapping them survives the whole suite on the pinned backend,
-    /// where the width changes nothing. On a C-zlib build a plain decode
-    /// separates them: after reinitialising at a negotiated 9, a reference past
-    /// 512 bytes is rejected by the rebuild and accepted by the reset, which
-    /// re-widened to 15. A gate whose verdict inverts under feature unification
-    /// is worse than none, so that test stays out and this stays recorded.
+    /// Which of the two runs is invisible on the pinned backend, where the width
+    /// changes nothing, so swapping them survives this suite. It is visible on a
+    /// C-zlib build: after reinitialising at a negotiated 9, a reference past 512
+    /// bytes is rejected by the rebuild and accepted by the reset, which
+    /// re-widened to 15. That assertion belongs to the named C validation arm,
+    /// because its expected result is backend-specific and this suite is the
+    /// backend-independent one.
     fn reinitialise(self, inflater: &mut Decompress) {
         if self.resets_in_place() {
             #[expect(
                 clippy::disallowed_methods,
-                reason = "the one width where reset keeps the configuration, pinned by `the_reset_route_is_taken_only_where_it_preserves_the_width`"
+                reason = "the one width where reset keeps the configuration, eligibility pinned by `reset_is_eligible_only_at_the_width_it_preserves`"
             )]
             inflater.reset(self.zlib_header);
         } else {
@@ -438,15 +437,50 @@ mod tests {
         );
     }
 
+    /// Each side of the progress test, separately.
+    ///
+    /// The stall row above reaches `Stalled` eventually, but so does a guard with
+    /// the consumed arm deleted -- same observable, different reason. These two
+    /// pin the arms one at a time: a call that produces nothing still has to
+    /// shorten the residual, and a call with no input left can still be carrying
+    /// output the backend owes.
+    #[test]
+    fn a_step_counts_consuming_and_producing_as_progress_separately() {
+        let wire = raw_deflate(b"hello, hello, hello");
+        let mut inflater = InflaterConfig::for_peer_window(15).build();
+        let consumed_only =
+            step(&mut inflater, &wire, &mut []).expect("a zero-output call is not a stall");
+        assert_eq!(consumed_only.produced, 0, "nowhere to put output");
+        let rest = consumed_only.remaining.expect("consuming is progress, so the loop continues");
+        assert!(rest.len() < wire.len(), "the residual shrank: {} of {}", rest.len(), wire.len());
+
+        // A long run of one byte compresses to a few bytes of wire, so the input
+        // drains long before the output the backend owes for it.
+        let long = raw_deflate(&b"a".repeat(30_000));
+        let mut runner = InflaterConfig::for_peer_window(15).build();
+        let mut unread = &long[..];
+        while !unread.is_empty() {
+            let mut scratch = [0u8; 16];
+            unread = step(&mut runner, unread, &mut scratch)
+                .expect("draining the input is not a stall")
+                .remaining
+                .expect("a call that consumed or produced continues");
+        }
+        let mut scratch = [0u8; 16];
+        let produced_only = step(&mut runner, &[], &mut scratch).expect("output is still owed");
+        assert!(produced_only.produced > 0, "the backend owes output with no input left");
+        assert_eq!(produced_only.remaining, Some(&[][..]), "producing is progress");
+    }
+
     /// Which reinitialisation route each negotiable width takes.
     ///
     /// `reset` keeps the negotiated window only where the configuration already
-    /// is the backend default, so exactly one width may take it. This pins the
-    /// predicate, which is why the `reset` call site names this row; it does not
-    /// pin `reinitialise` consulting it in the right direction, and nothing
-    /// reachable from here can.
+    /// is the backend default, so exactly one width is eligible for it. This pins
+    /// eligibility, which is why the `reset` call site names this row. It does not
+    /// pin which route `reinitialise` actually took -- nothing reachable from this
+    /// backend can, and the C validation arm owns that.
     #[test]
-    fn the_reset_route_is_taken_only_where_it_preserves_the_width() {
+    fn reset_is_eligible_only_at_the_width_it_preserves() {
         for peer in 8..=15u8 {
             let config = InflaterConfig::for_peer_window(peer);
             assert_eq!(

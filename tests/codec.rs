@@ -334,6 +334,37 @@ fn a_long_bfinal_message_leaves_the_next_message_exact() {
     );
 }
 
+/// The mandatory tail may itself land in a later fragment: section 7.2.1
+/// fragments a message by "splitting the result of running this algorithm", so
+/// the octet step 3 leaves behind can arrive on its own. Nothing observes that a
+/// later fragment is what opened the stream unless the earlier one closed it.
+#[test]
+fn rfc_7692_7_2_1_the_mandatory_tail_may_arrive_in_a_later_fragment() {
+    let mut decoder = plain_decoder();
+    let mut got = decoder
+        .decompress(&bare_finished_stream(b"Hello"), false, ROOMY)
+        .expect("the fragment that ends the stream");
+    got.extend(decoder.decompress(&[0x00], true, ROOMY).expect("the fragment carrying the tail"));
+    assert_eq!(got, b"Hello", "the tail licenses the trailer wherever it arrives");
+}
+
+/// And the same split with the tail nowhere in the message, which is Dario's
+/// probe shape once its polarity is corrected: a bare finished stream in a
+/// non-final fragment and nothing after it. The missing-tail answer has to hold
+/// across a fragment boundary too, not only within one call.
+#[test]
+fn a_bare_finished_stream_is_rejected_across_a_fragment_boundary() {
+    let mut decoder = plain_decoder();
+    decoder
+        .decompress(&bare_finished_stream(b"no appended empty block"), false, ROOMY)
+        .expect("the fragment itself decodes");
+    assert_eq!(
+        decoder.decompress(&[], true, ROOMY),
+        Err(CodecError::InvalidStream),
+        "the mandatory tail arrived in no fragment at all"
+    );
+}
+
 /// A message that carries no bytes at all began no block, so the four octets step
 /// 3 removed cannot belong to it. RFC 7692 section 7.2.3.6 has an endpoint send
 /// the payload `0x00` for an empty fragment -- one octet, not none -- so this is

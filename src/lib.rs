@@ -52,6 +52,7 @@
 //! is rejected where it is configured.
 
 mod client;
+mod codec;
 mod config;
 mod error;
 mod grammar;
@@ -59,7 +60,8 @@ mod negotiated;
 mod server;
 
 pub use client::{ClientHandshake, ClientOffer};
+pub use codec::{Decoder, DecompressedLimit};
 pub use config::{ClientConfig, ServerConfig};
-pub use error::{ConfigError, NegotiationError};
+pub use error::{CodecError, ConfigError, NegotiationError};
 pub use negotiated::{Negotiated, PmdComposition};
 pub use server::ServerHandshake;

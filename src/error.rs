@@ -110,6 +110,55 @@ impl fmt::Display for NegotiationError {
 
 impl std::error::Error for NegotiationError {}
 
+/// Why a compressed message could not be turned back into bytes.
+///
+/// Every variant is terminal for its direction. The split that matters is
+/// [`MessageTooLong`](Self::MessageTooLong) against the rest: a host maps that
+/// one to whatever it already does for an over-capacity message, close code
+/// 1009, while the others say the peer's stream or this side's state is broken.
+/// No compression-backend error type is reachable from here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CodecError {
+    /// The message decompressed past the ceiling the host supplied. `size` is
+    /// always exactly one byte past `limit`, because that byte is what detects
+    /// the overrun: the decoder never accumulates a chunk beyond the ceiling to
+    /// find out it went over.
+    MessageTooLong {
+        /// The decompressed bytes this message had produced when it was stopped.
+        size: usize,
+        /// The ceiling that was in force for the call that stopped it.
+        limit: usize,
+    },
+
+    /// The compressed bytes are not a valid DEFLATE stream, or are not the
+    /// stream this connection's history says they should be.
+    InvalidStream,
+
+    /// The backend reported success while consuming and producing nothing. A
+    /// caller that trusted it would spin forever, so it is an error here.
+    Stalled,
+
+    /// This direction already failed. The peer's compressor and this side's
+    /// history are no longer in step, so there is nothing to resume.
+    Poisoned,
+}
+
+impl fmt::Display for CodecError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MessageTooLong { size, limit } => {
+                write!(formatter, "message decompressed to {size} bytes, over the {limit} allowed")
+            }
+            Self::InvalidStream => formatter.write_str("invalid DEFLATE stream"),
+            Self::Stalled => formatter.write_str("the compression backend stopped making progress"),
+            Self::Poisoned => formatter.write_str("this direction has already failed"),
+        }
+    }
+}
+
+impl std::error::Error for CodecError {}
+
 /// Why a locally supplied value was rejected before it could reach a backend.
 ///
 /// Configuration is validated where it is set, so an out-of-range window can

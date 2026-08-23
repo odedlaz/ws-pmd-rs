@@ -29,3 +29,12 @@ fn every_scenario_decodes_whatever_the_declared_window_was() {
         assert_eq!(fresh(declared, gap), Outcome::Exact, "declared {declared}, gap {gap}");
     }
 }
+
+/// The backend premise the crate's `stream_open` widening classification rests
+/// on, measured on this arm's backend. Both arms run it: it is `flate2`'s
+/// contract rather than a difference between the two, so a divergence in it is
+/// the finding.
+#[test]
+fn a_stream_start_cannot_produce_before_it_consumes() {
+    assert_eq!(stream_starts_that_broke_the_premise(), Vec::<String>::new());
+}

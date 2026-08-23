@@ -22,10 +22,8 @@ const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 ///
 /// One hard constraint: at least 1. The ceiling detector asks the backend for
 /// one byte past the remaining allowance, so a zero-length buffer makes every
-/// call produce nothing and the stall guard reports a backend that never
-/// moved. Measured, not argued: against the 31-row codec suite at this commit, a
-/// scratch of 0 fails 29 of them, and 1, 16 and 4096 each pass all 31. Counts go
-/// stale as rows are added, so they belong to the rev that measured them.
+/// call produce nothing and the stall guard reports a backend that never moved.
+///
 /// Everything above 1 trades backend round trips against stack, and correctness
 /// does not depend on where in that range this sits. 4096 is the value the
 /// extraction source used.
@@ -420,7 +418,9 @@ fn step<'a>(
 mod tests {
     use flate2::{Compress, Compression, FlushCompress};
 
-    use super::{advance, step, CodecError, InflaterConfig, DEFAULT_INFLATER_WINDOW_BITS};
+    use super::{
+        advance, step, CodecError, Decompress, InflaterConfig, DEFAULT_INFLATER_WINDOW_BITS,
+    };
     use crate::negotiated::{Negotiated, Role};
 
     /// A raw DEFLATE stream ending in BFINAL, from an independent compressor.
@@ -514,6 +514,74 @@ mod tests {
         let produced_only = step(&mut runner, &[], &mut scratch).expect("output is still owed");
         assert!(produced_only.produced > 0, "the backend owes output with no input left");
         assert_eq!(produced_only.remaining, Some(&[][..]), "producing is progress");
+    }
+
+    /// The `flate2` property the `stream_open` widening classification leans on:
+    /// at a stream start, output cannot arrive before input is taken.
+    ///
+    /// `inflate` opens the position only on a step that consumed, and widening
+    /// that to any step that made progress is equivalent only while this holds.
+    /// It is the backend's contract rather than this crate's code, so a dep bump
+    /// that broke it would retire the reasoning without failing anything -- hence
+    /// a row. Both reinitialisation routes run, since only the width decides
+    /// which, and the three scratch sizes vary the room the backend is offered,
+    /// because a spurious production needs somewhere to land.
+    ///
+    /// This reaches `step` directly, so it covers the backend this workspace
+    /// resolves. Both validation arms carry the same premise against `flate2`
+    /// directly, one per supported graph.
+    #[test]
+    fn output_cannot_precede_input_at_a_stream_start() {
+        let wire = raw_deflate(b"hello, hello, hello");
+        for peer in 8..=15u8 {
+            let config = InflaterConfig::for_peer_window(peer);
+            let route = if config.resets_in_place() { "reset" } else { "rebuild" };
+            for width in [1usize, 2, 4096] {
+                let mut scratch = vec![0u8; width];
+
+                let mut fresh = config.build();
+                assert_a_stream_start(
+                    &mut fresh,
+                    &wire,
+                    &mut scratch,
+                    &format!("built at {peer}/{width}"),
+                );
+
+                // Run a message through first, so the reinitialisation under
+                // test is the one production performs and not a second build.
+                let mut used = config.build();
+                let opened = step(&mut used, &wire, &mut scratch).expect("the wire decodes");
+                assert!(opened.produced > 0, "the run-up produced at peer {peer}, scratch {width}");
+                config.reinitialise(&mut used);
+                assert_a_stream_start(
+                    &mut used,
+                    &wire,
+                    &mut scratch,
+                    &format!("{route} at {peer}/{width}"),
+                );
+            }
+        }
+    }
+
+    /// What a stream start guarantees: a call with nothing to take produces
+    /// nothing, and the first call that produces has consumed.
+    ///
+    /// The idle call moves neither counter, so the inflater is still at a stream
+    /// start when the wire arrives. Both assertions are live -- one fails if a
+    /// step stops reporting what it produced, the other if it stops reporting
+    /// what it consumed, and the second is the one the classification needs.
+    fn assert_a_stream_start(inflater: &mut Decompress, wire: &[u8], scratch: &mut [u8], at: &str) {
+        let idle = step(inflater, &[], scratch).expect("an idle call is not a stall");
+        assert_eq!(idle.produced, 0, "{at}: an idle call produced");
+        let first = step(inflater, wire, scratch).expect("the wire decodes");
+        assert!(first.produced > 0, "{at}: the first call produced nothing");
+        let rest = first.remaining.expect("a call that moved continues");
+        assert!(
+            rest.len() < wire.len(),
+            "{at}: produced {} bytes with none of the {} consumed",
+            first.produced,
+            wire.len()
+        );
     }
 
     /// Which reinitialisation route each negotiable width takes.

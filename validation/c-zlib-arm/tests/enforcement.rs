@@ -56,3 +56,12 @@ fn the_rejection_boundary_follows_the_declared_width() {
     assert_eq!(fresh(12, 5_000), rejected, "4096 cannot reach 5000");
     assert_eq!(fresh(13, 5_000), Outcome::Exact, "8192 clears 5000");
 }
+
+/// The backend premise the crate's `stream_open` widening classification rests
+/// on, measured on this arm's backend. Both arms run it: it is `flate2`'s
+/// contract rather than a difference between the two, so a divergence in it is
+/// the finding.
+#[test]
+fn a_stream_start_cannot_produce_before_it_consumes() {
+    assert_eq!(stream_starts_that_broke_the_premise(), Vec::<String>::new());
+}

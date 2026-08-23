@@ -441,9 +441,10 @@ fn a_valueless_client_window_in_a_response_is_rejected() {
     assert_eq!(error, NegotiationError::ClientWindowValueless);
 }
 
-/// Every other bounded-offer row is a rejection, so an over-rejecting mutant
-/// passes all of them. This is the row that says the conforming response is
-/// accepted and that each answered value reaches the agreement.
+/// One row, three properties: an exactly-answered bound is accepted, and each
+/// of the three answered values -- takeover, peer width, local width -- reaches
+/// the agreement. It pairs with `a_response_may_narrow_below_the_offered_bound`
+/// to own the comparator boundary from both sides, `=` and `<`.
 #[test]
 fn a_bounded_offer_accepts_the_response_that_answers_it() {
     let config = ClientConfig::new()
@@ -591,6 +592,16 @@ fn sealing_without_an_offer_rejects_a_request_that_has_one() {
     let error = ClientHandshake::seal_without_offer(&headers(&[b"permessage-deflate"]))
         .expect_err("this is the wrong state for these headers");
     assert_eq!(error, NegotiationError::OfferCollision);
+}
+
+/// The proof is about the request, so an unreadable request cannot yield one.
+/// Swallowing the grammar error as "no offer here" mints the no-offer state
+/// from bytes nobody parsed, and every other row in this file stays green.
+#[test]
+fn sealing_without_an_offer_proves_the_requests_grammar() {
+    let error = ClientHandshake::seal_without_offer(&headers(&[br#"x-other; note="open"#]))
+        .expect_err("an unreadable request cannot prove it carries no offer");
+    assert_eq!(error, NegotiationError::MalformedHeader);
 }
 
 #[test]

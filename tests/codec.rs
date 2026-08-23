@@ -223,11 +223,23 @@ fn a_compression_bomb_is_stopped_during_inflate() {
     wire.push(0x00);
 
     let limit = 8 * 1024;
-    match plain_decoder().decompress(&wire, true, DecompressedLimit::bytes(limit)) {
-        Err(CodecError::MessageTooLong { size, .. }) => {
-            assert_eq!(size, limit + 1, "a bomb must be stopped as it crosses, not after");
+    // Both fragment kinds. The ceiling is enforced during inflate, not at the
+    // end of a message, so a decoder that only checked on the final fragment
+    // would materialise the whole bomb first and pass a final-only row.
+    for final_fragment in [true, false] {
+        let mut decoder = plain_decoder();
+        match decoder.decompress(&wire, final_fragment, DecompressedLimit::bytes(limit)) {
+            Err(CodecError::MessageTooLong { size, limit: reported }) => {
+                assert_eq!(size, limit + 1, "a bomb must be stopped as it crosses, not after");
+                assert_eq!(reported, limit);
+            }
+            other => panic!("final_fragment={final_fragment}: must be rejected, got {other:?}"),
         }
-        other => panic!("a bomb against a small ceiling must be rejected, got {other:?}"),
+        assert_eq!(
+            decoder.decompress(&wire, true, ROOMY),
+            Err(CodecError::Poisoned),
+            "final_fragment={final_fragment}: the direction is terminal"
+        );
     }
 }
 
@@ -289,7 +301,10 @@ fn the_running_total_resets_at_the_end_of_a_message() {
 }
 
 /// The host passes its current ceiling on every call, so a runtime configuration
-/// change is obeyed rather than frozen at negotiation. Both directions of change.
+/// change is obeyed rather than frozen at negotiation. This row lowers it
+/// between messages; `a_ceiling_raised_between_fragments_is_honoured` is the
+/// other direction, and it is the harder one -- a decoder that keeps the
+/// smallest ceiling it has seen passes every row here.
 #[test]
 fn a_ceiling_change_between_messages_is_observed() {
     let payload = vec![b'q'; 3000];
@@ -423,11 +438,56 @@ fn peer_no_context_takeover_drops_the_window_between_messages() {
             .expect("first"),
         b"Hello",
     );
-    let second = decoder.decompress(&[0xf2, 0x00, 0x11, 0x00, 0x00], true, ROOMY);
-    assert!(
-        !matches!(second.as_deref(), Ok(b"Hello")),
-        "a dropped window cannot resolve a back-reference into the previous message, got {second:?}"
+    // Observed, not predicted: a back-reference into a window that is gone
+    // fails the stream. `!matches!(.., Ok(b"Hello"))` would also have accepted
+    // corrupt plaintext, or an error this decoder had inherited from earlier.
+    assert_eq!(
+        decoder.decompress(&[0xf2, 0x00, 0x11, 0x00, 0x00], true, ROOMY),
+        Err(CodecError::InvalidStream),
     );
+    assert_eq!(
+        decoder.decompress(&[0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00], true, ROOMY),
+        Err(CodecError::Poisoned),
+        "a broken stream is terminal for the direction"
+    );
+}
+
+/// The other half: dropping the window must not break messages that never
+/// reference across one. Without this, a decoder that reset at the wrong point
+/// -- before feeding the trailer rather than after -- still fails the
+/// back-reference above and looks correct.
+#[test]
+fn a_no_takeover_decoder_reads_independent_messages_exactly() {
+    let mut decoder = decoder_for(b"permessage-deflate; server_no_context_takeover");
+    for payload in [&b"first message, compressible, first message"[..], b"and a second one"] {
+        // A fresh peer per message is what a no-takeover sender produces: each
+        // message starts from an empty window on both sides.
+        let wire = Peer::new(15).send(payload);
+        assert_eq!(
+            decoder.decompress(&wire, true, ROOMY).expect("an independent message decodes"),
+            payload
+        );
+    }
+}
+
+/// A decoder that remembers the smallest ceiling seen during a message honours
+/// every reduction, resets on final, and passes every other row in this file --
+/// while illegally rejecting a host that raises its capacity mid-message. The
+/// ceiling is read fresh on each call, so the raise has to be obeyed too.
+#[test]
+fn a_ceiling_raised_between_fragments_is_honoured() {
+    let (head, tail) = Peer::new(15).send_in_two(&vec![b'a'; 3000], &vec![b'b'; 3000]);
+    let mut decoder = plain_decoder();
+
+    let first = decoder
+        .decompress(&head, false, DecompressedLimit::bytes(4000))
+        .expect("3000 of 4000 fits");
+    assert_eq!(first.len(), 3000);
+
+    let second = decoder
+        .decompress(&tail, true, DecompressedLimit::bytes(6000))
+        .expect("the raised ceiling admits the rest of the message");
+    assert_eq!(second.len(), 3000, "all 6000 bytes of the message must be delivered");
 }
 
 /// `MessageTooLong.size` is one past `limit` only while the ceiling still

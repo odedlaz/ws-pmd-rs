@@ -394,9 +394,11 @@ fn a_widened_server_window_is_rejected() {
     assert_eq!(error, NegotiationError::ServerWindowTooLarge);
 }
 
-/// RFC 7692 section 7.1.2.2: the offered value is a hint, the server may answer
-/// wider or ignore it, and the client stays bound to its own offer regardless.
-/// Failing here would reject a conforming server.
+/// RFC 7692 section 7.1.2.2: the offered value is a hint the server may ignore
+/// or answer wider, so failing here would reject a conforming peer. Section
+/// 7.2.1 would then permit compressing up to the agreed value; installing the
+/// offer instead is local policy, because the offer came from a configured
+/// bound and a peer allowing more does not erase a setting.
 #[test]
 fn a_response_wider_than_the_client_hint_narrows_to_the_hint() {
     let config = ClientConfig::new().client_max_window_bits(10).expect("legal");

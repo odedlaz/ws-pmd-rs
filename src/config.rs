@@ -13,7 +13,8 @@ use crate::error::ConfigError;
 const MAX_WINDOW_BITS: u8 = 15;
 
 /// The narrowest window a compressor can be built for. RFC 7692 admits 8 on the
-/// wire, but zlib cannot construct an 8-bit compressor.
+/// wire; flate2's `Compress::new_with_window_bits` asserts `9 ..= 15` in its own
+/// frontend, the same floor and the same authority as the inflater's.
 const MIN_LOCAL_WINDOW_BITS: u8 = 9;
 
 /// The narrowest window that may appear on the wire.

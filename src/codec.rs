@@ -20,7 +20,12 @@ const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 /// Output taken from the backend per call. Matches the extraction source.
 const SCRATCH: usize = 4096;
 
-/// The narrowest inflater zlib can build.
+/// The narrowest inflater `flate2` will construct.
+///
+/// `Decompress::new_with_window_bits` asserts `9 ..= 15` in flate2's own
+/// frontend (`mem.rs:420-423`), before any backend sees the value, so this is
+/// an API contract rather than a property of zlib. Whether some backend could
+/// inflate at 8 is not a question this crate can ask through flate2.
 const MIN_INFLATER_WINDOW_BITS: u8 = 9;
 
 /// A finite ceiling on the decompressed bytes one message may produce.
@@ -111,9 +116,9 @@ impl Negotiated {
     pub fn into_decoder(self) -> Decoder {
         Decoder {
             // A negotiated peer window of 8 is legal and is reported as 8, but
-            // zlib has no 8-bit inflater. Widening is safe in this direction
-            // only: a wider window accepts every stream a narrower compressor
-            // can emit. The agreement itself is never rewritten.
+            // flate2 will not build an inflater below 9. Widening is safe in
+            // this direction only: a wider window accepts every stream a
+            // narrower compressor can emit. The agreement is never rewritten.
             inflater: Decompress::new_with_window_bits(
                 false,
                 self.peer_max_window_bits().max(MIN_INFLATER_WINDOW_BITS),

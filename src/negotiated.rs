@@ -102,7 +102,7 @@ impl Negotiated {
     /// The window the peer's compressor may use, exactly as negotiated.
     ///
     /// This can be 8. The value is reported unchanged; only building a local
-    /// inflater for it raises it to 9, because zlib has no 8-bit inflater. That
+    /// inflater for it raises it to 9, which is flate2's floor. That
     /// is safe in one direction only: a wider inflater window accepts every
     /// stream a narrower compressor can produce.
     #[must_use]

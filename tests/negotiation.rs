@@ -551,7 +551,9 @@ fn sealing_accepts_the_offer_beside_an_unrelated_extension() {
 
 // ----------------------------------------------------- the no-offer workflow
 
-/// RFC 7692 section 7.1: a server may select only from what the client offered.
+/// RFC 6455 section 9 forbids a server responding with an extension the client
+/// did not request; RFC 7692 section 5 makes failing the connection this side's
+/// MUST when one does.
 /// A client that offered nothing is the only side that can catch a selection
 /// anyway, and before `seal_without_offer` the crate had no state for it -- the
 /// rule fell to every host separately.

@@ -64,10 +64,10 @@
 //! RFC 7692 names its parameters after the server and the client. Which one is
 //! "this side" depends on the role, so [`Negotiated`] reports `local` and `peer`
 //! instead and keeps the mapping private. A peer window of 8 is legal and is
-//! reported as 8; only building an inflater raises it to 9, because zlib has no
-//! 8-bit inflater and a wider inflater accepts every stream a narrower
-//! compressor emits. A local compressor window is never 8 and never clamped: it
-//! is rejected where it is configured.
+//! reported as 8; only building an inflater raises it to 9, which is flate2's
+//! floor for both directions, and a wider inflater accepts every stream a
+//! narrower compressor emits. A local compressor window is never 8 and never
+//! clamped: it is rejected where it is configured.
 
 mod client;
 mod codec;

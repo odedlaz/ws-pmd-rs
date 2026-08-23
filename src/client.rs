@@ -25,7 +25,7 @@ use crate::negotiated::{render, ClientBits, Negotiated, PmdComposition, Role};
 const MAX_WINDOW_BITS: u8 = 15;
 
 /// A `permessage-deflate` offer installed in a request that has not been sent.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientOffer {
     config: ClientConfig,
     installed: HeaderValue,
@@ -33,14 +33,14 @@ pub struct ClientOffer {
 
 /// A request confirmed against the exact headers leaving the host. Only this
 /// value can finish a handshake, whether or not it carries an offer.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClientHandshake {
     /// `None` once [`seal_without_offer`](ClientHandshake::seal_without_offer)
     /// has proved the request carried no offer at all.
     offer: Option<SealedOffer>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SealedOffer {
     config: ClientConfig,
     sealed: HeaderValue,

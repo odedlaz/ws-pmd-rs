@@ -20,7 +20,7 @@ use crate::negotiated::{render, ClientBits, Negotiated, PmdComposition, Role};
 const MAX_WINDOW_BITS: u8 = 15;
 
 /// A selection the server has made but not yet committed to the wire.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ServerHandshake {
     proposed: HeaderValue,
     agreement: Negotiated,

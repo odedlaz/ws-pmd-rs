@@ -69,6 +69,44 @@ impl Negotiated {
     ///
     /// The first point that allocates zlib state, and the only way to reach it:
     /// there is no constructor that turns local configuration into a live codec.
+    /// It consumes the agreement, and [`Negotiated`] is neither `Copy` nor
+    /// `Clone`, so one agreement mints one codec.
+    ///
+    /// ```
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
+    /// #     .expect("the server selected it");
+    /// let decoder = agreed.into_decoder();
+    /// # Ok::<(), permessage_deflate::NegotiationError>(())
+    /// ```
+    ///
+    /// Spending the same agreement twice does not compile. The example above is
+    /// the control for this one: they differ by exactly the second call.
+    ///
+    /// ```compile_fail
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
+    /// #     .expect("the server selected it");
+    /// let decoder = agreed.into_decoder();
+    /// let another = agreed.into_decoder();
+    /// # Ok::<(), permessage_deflate::NegotiationError>(())
+    /// ```
     #[must_use]
     pub fn into_decoder(self) -> Decoder {
         Decoder {

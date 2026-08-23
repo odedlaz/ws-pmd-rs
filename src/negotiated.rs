@@ -41,10 +41,12 @@ pub enum PmdComposition {
 
 /// A settled `permessage-deflate` agreement.
 ///
-/// Holds settings, not compression state: it is cheap to copy and allocates
-/// nothing. Codecs are built by consuming it, which is the only way to reach
-/// active compression state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Holds settings, not compression state, and allocates nothing. It is
+/// deliberately neither `Copy` nor `Clone`: codecs are built by consuming it,
+/// and that is only a gate if the value cannot be spent twice. A `Copy`
+/// agreement made double-minting invisible -- `n.into_decoder()` twice
+/// compiled, with no syntactic marker that anything unusual had happened.
+#[derive(Debug, PartialEq, Eq)]
 pub struct Negotiated {
     role: Role,
     server_no_context_takeover: bool,

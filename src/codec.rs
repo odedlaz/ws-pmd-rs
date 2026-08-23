@@ -82,6 +82,10 @@ impl DecompressedLimit {
 /// at first use, so the width both bounds memory -- 512 bytes against 32 KiB --
 /// and is enforced while decoding, where a back-reference past it fails the
 /// stream. Cargo features are additive, so a downstream graph selects which.
+///
+/// Losing the width widens the inflater, which is the lenient direction: it goes
+/// on accepting every stream the peer may legally send. What a lost width costs
+/// is the negotiated memory bound, not decoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InflaterConfig {
     zlib_header: bool,

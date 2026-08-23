@@ -18,14 +18,23 @@ with `new_with_window_bits(false, 8)`, whose panic is flate2's own frontend asse
 fires identically under every backend.
 
 The arms share one scenario source, `include!`d rather than made a crate, so they cannot
-drift and neither can be built with the other's backend.
+drift and neither can be built with the other's backend. The C arm selects its backend the
+way a consumer does -- crate default off, crate `zlib` feature on -- so C is the only
+backend in its graph rather than the one that won a dispatch.
 
 ## What each arm is for
 
 C zlib sizes its inflater window `1 << wbits` and enforces it while decoding; zlib-rs
 takes a full-size window whatever it is told and enforces nothing. So a peer that declares
 `server_max_window_bits=9` and compresses at 15 is rejected on one backend and decoded
-byte-exact on the other. The C arm owns production construction and both reinitialisation
+byte-exact on the other.
+
+**That divergence is a property of the locked flate2, not of the two backends.** At flate2
+1.0.31 the `zlib-rs` feature arrives through the `libz-rs-sys 0.2.1` shim and *enforces*
+the declared window, so the same probe reports "C" in a graph with no C in it. Two things
+differ between the ends of our declared range -- the shim and the zlib-rs version -- and
+which of them closes the divergence is unmeasured. The arms are sound because the lock
+pins 1.1.9; do not carry the claim to another version without re-running it. The C arm owns production construction and both reinitialisation
 paths; the zlib-rs arm records the leniency deliberately, which is what makes the C arm's
 rejections attributable to the backend rather than to the payload.
 
@@ -33,3 +42,23 @@ Payload and protocol come from `RESEARCH/PMD_FAR_REFERENCE_REPRODUCER_2026_08_23
 four properties are load-bearing: unmistakable far-match presence, a self-proving
 discriminator, a control positive for the discriminating property, and a boundary that
 tracks the arithmetic rather than merely being crossed. Do not weaken any of them.
+
+# Consumer matrix
+
+The arms prove behaviour on a named backend. `consumer-matrix/run.sh` proves the *public
+feature surface*: seven graphs, each an external crate consuming the package unpacked from
+`cargo package` rather than this worktree, so it cannot pass on files the package excludes.
+
+```sh
+./validation/consumer-matrix/run.sh
+```
+
+It reports two columns and keeps them apart. **Provenance** -- which backend crate is
+compiled -- is what a consumer choosing `zlib-rs` is actually choosing, and it is visible
+only in the graph. **Behaviour** is what the arms pin. One probe cannot serve both:
+`libz-sys` and `zlib-rs` implement one specification, so a behavioural backend oracle is a
+bet on a divergence, and it stops discriminating wherever the two agree.
+
+The floor row is provenance-only for that reason, not as a fallback. The same
+default-plus-external-C graph binds C at flate2 1.1.9 and the Rust backend at 1.0.31, and
+no behaviour separates them there.

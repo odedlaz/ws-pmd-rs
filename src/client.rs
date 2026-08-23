@@ -1,9 +1,10 @@
 //! The client half of the handshake.
 //!
-//! Three states, and the type of each is the proof that the previous one ran.
-//! [`ClientOffer`] holds what was installed in the request; [`ClientHandshake`]
-//! exists only once that offer has been checked against the exact request the
-//! host is about to send; only a sealed handshake can produce a [`Negotiated`].
+//! Each type is the proof that the step before it ran. [`ClientOffer`] holds
+//! what was installed in the request; a [`ClientHandshake`] exists only once
+//! the request that is actually being sent has been checked -- either against
+//! that offer, or against the absence of one -- and only a sealed handshake can
+//! produce a [`Negotiated`].
 //! Nothing here consults [`ClientConfig`] to decide what went on the wire — the
 //! sealed offer is the record, because a host is free to rewrite headers after
 //! the crate has installed them.

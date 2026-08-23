@@ -160,6 +160,42 @@ fn a_message_after_a_bfinal_message_still_decodes() {
     assert_eq!(second, payload, "the inflater must have restarted after BFINAL");
 }
 
+/// The BFINAL row above passes on a coincidence, so this is the one that pins the
+/// behaviour.
+///
+/// `00 00 ff ff` is an empty stored block only when its three header bits ride in
+/// the tail of a preceding partial byte. `BFINAL_HELLO` leaves exactly one spare
+/// byte after its stream ends, which supplies them -- so feeding the trailer to
+/// the rebuilt inflater happened to work there. A peer whose stream ends on a
+/// byte boundary leaves none, and the same trailer then parses as a stored block
+/// with a length nobody sent: the next message decoded to 1,033 bytes for a 1,024
+/// byte payload, silently, with no error and no poisoning.
+#[test]
+fn a_message_after_a_byte_aligned_bfinal_message_decodes_exactly() {
+    let mut decoder = plain_decoder();
+    let first = b"a peer that ends its stream on a byte boundary".to_vec();
+    let mut ender = Compress::new_with_window_bits(Compression::best(), false, 15);
+    let mut wire = vec![0u8; first.len() * 2 + 64];
+    assert_eq!(
+        ender.compress(&first, &mut wire, FlushCompress::Finish).expect("one buffer"),
+        flate2::Status::StreamEnd,
+        "the whole stream must finish"
+    );
+    wire.truncate(usize::try_from(ender.total_out()).expect("fits"));
+    assert_eq!(decoder.decompress(&wire, true, ROOMY).expect("first"), first);
+
+    // Big enough to carry internal matches, so a corrupted inflater state shows
+    // up as wrong bytes rather than surviving by being too short to matter.
+    let payload: Vec<u8> =
+        (0..4096u32).map(|i| u8::try_from(i.wrapping_mul(31) % 251).expect("under 251")).collect();
+    let second = Peer::new(15).send(&payload);
+    assert_eq!(
+        decoder.decompress(&second, true, ROOMY).expect("second"),
+        payload,
+        "the message after a byte-aligned BFINAL must arrive byte-exact"
+    );
+}
+
 /// Every other row completes in a few passes over the scratch buffer, so none
 /// of them exercises a decoder that refills it many times. This one does, and
 /// it is also what makes the `flate2` floor in `Cargo.toml` self-guarding: the

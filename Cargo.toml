@@ -8,6 +8,10 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 
+# The named backend arms are development-only and must not ship in the package;
+# see validation/README.md.
+exclude = ["validation"]
+
 [dependencies]
 http = "1"
 thiserror = "2"

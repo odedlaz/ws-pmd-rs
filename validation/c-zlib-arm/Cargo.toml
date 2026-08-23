@@ -1,0 +1,23 @@
+# The C-zlib arm. It adds flate2's `zlib` feature the way any downstream crate
+# might; Cargo's additive features then unify it with the library's `zlib-rs`
+# request, `any_c_zlib` wins flate2's dispatch, and the crate under test runs on
+# C zlib. That substitution is the thing being validated, not a workaround.
+#
+# `[workspace]` keeps this its own build. Building the two arms together would
+# unify their features and silently give both the C backend.
+[package]
+name = "c-zlib-arm"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+permessage-deflate = { path = "../.." }
+http = "1"
+
+[dependencies.flate2]
+version = "1.0.31"
+default-features = false
+features = ["zlib"]

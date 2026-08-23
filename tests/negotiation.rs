@@ -1082,3 +1082,47 @@ fn the_server_checks_count_then_grammar_then_correspondence() {
         "correspondence still owns the well-formed case, which is all its name ever claimed"
     );
 }
+
+/// Both response paths run the same `grammar::validate`, so for input that
+/// validator rejects they must report the same cause. This is the guard on that
+/// sharing: fork it -- give either path its own validation -- and this goes red
+/// whatever shape the fork diverges on, which no per-shape row can promise.
+///
+/// It stops at syntax deliberately, and the second half is why. A window value
+/// of 99 is grammatically valid and wrong one layer down; the client parses the
+/// parameter and the server compares against the value it handed out, so they
+/// disagree by design. Widening the first half to "malformed input" would assert
+/// an equivalence the architecture breaks on purpose, which is why that row is
+/// pinned here rather than left for someone to discover by widening this one.
+#[test]
+fn both_response_paths_agree_on_what_the_grammar_rejects() {
+    let request = headers(&[b"permessage-deflate"]);
+    let server = |value: &[u8]| {
+        ServerHandshake::accept(ServerConfig::new(), &request)
+            .expect("the request is conforming")
+            .expect("the server selects it")
+            .finish(&headers(&[value]), PmdComposition::Compatible)
+    };
+
+    for rejected in
+        [b"permessage-deflate; =".as_slice(), b"x-other; =", b"x-other; a=", b"x-other;;", b",,"]
+    {
+        assert_eq!(
+            server(rejected).expect_err("the server response does not parse"),
+            NegotiationError::MalformedHeader,
+        );
+        assert_eq!(
+            client_round_trip(ClientConfig::new(), &[rejected])
+                .expect_err("the client response does not parse"),
+            NegotiationError::MalformedHeader,
+        );
+    }
+
+    // Valid grammar, wrong one layer down, and the layer differs per path.
+    let window = b"permessage-deflate; server_max_window_bits=99".as_slice();
+    assert_eq!(server(window).expect_err("not the proposal"), NegotiationError::ResponseAltered);
+    assert_eq!(
+        client_round_trip(ClientConfig::new(), &[window]).expect_err("99 is not 8..=15"),
+        NegotiationError::InvalidWindowBits,
+    );
+}

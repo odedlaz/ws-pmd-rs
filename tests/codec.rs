@@ -396,10 +396,12 @@ fn an_empty_message_is_rejected_after_a_no_takeover_reinitialisation() {
     );
 }
 
-/// Every other row completes in a few passes over the scratch buffer, so none
-/// of them exercises a decoder that refills it many times. This one does, and
-/// it is also what makes the `flate2` floor in `Cargo.toml` self-guarding: the
-/// backend below that floor aborts the process on exactly this shape.
+/// A message that refills the scratch buffer many times over, which is what
+/// reproduces the abort in the `flate2` versions `Cargo.toml` excludes,
+/// whenever one of them is the backend resolved. It does not defend that floor:
+/// as `Cargo.toml` records, the locked gate resolves the `Cargo.lock` entry
+/// whatever the declared requirement says, so what excludes those versions is
+/// the requirement itself.
 #[test]
 fn a_message_spanning_many_scratch_refills_decodes() {
     let payload: Vec<u8> =

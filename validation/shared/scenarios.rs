@@ -7,7 +7,7 @@
 // driver: these go through the crate's public `Decoder`, which is chunked at its
 // own `SCRATCH`, rather than through `flate2` directly.
 
-use flate2::{Compress, Compression, FlushCompress, Status};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
     ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, PmdComposition,
@@ -180,4 +180,37 @@ fn after_bfinal_reinit(declared: u8, gap: usize) -> Outcome {
 fn far_match_saving(gap: usize) -> usize {
     let plain = far_reference_payload(gap);
     peer_message(&plain, 9).len().saturating_sub(peer_message(&plain, 15).len())
+}
+
+/// Every stream start where `flate2` produced output without consuming input, or
+/// produced nothing at all.
+///
+/// The crate's `stream_open` widening is classified equivalent only while a
+/// stream start cannot produce before it consumes. `src/codec.rs` asserts that on
+/// the backend the library resolves; this is the other supported graph, and the
+/// arms are the only place it runs. Reached through `flate2` directly, because
+/// the public decoder reports what a message decoded to and not what one backend
+/// call moved -- so a divergence here is invisible to every other row.
+///
+/// A case that produced nothing is reported too: it would satisfy the premise
+/// while measuring nothing.
+fn stream_starts_that_broke_the_premise() -> Vec<String> {
+    let wire = bfinal_message(b"hello, hello, hello", 15);
+    let mut broken = Vec::new();
+    for window_bits in 9..=15u8 {
+        for width in [1usize, 2, 4096] {
+            let mut inflater = Decompress::new_with_window_bits(false, window_bits);
+            let mut scratch = vec![0u8; width];
+            inflater
+                .decompress(&wire, &mut scratch, FlushDecompress::None)
+                .expect("the wire decodes");
+            let at = format!("window {window_bits}, scratch {width}");
+            if inflater.total_out() == 0 {
+                broken.push(format!("{at}: produced nothing, so it measures nothing"));
+            } else if inflater.total_in() == 0 {
+                broken.push(format!("{at}: produced {} with nothing consumed", inflater.total_out()));
+            }
+        }
+    }
+    broken
 }

@@ -1,6 +1,7 @@
-# The zlib-rs arm: the backend the library pins, added here explicitly so the
-# arm names its own backend rather than inheriting one. Records the deliberate
-# leniency that makes the C arm's rejections meaningful.
+# The zlib-rs arm. It names its backend through the library's own feature, the
+# way a consumer does, so this arm and the C arm differ only in which feature
+# they ask for. Records the deliberate leniency that makes the C arm's
+# rejections meaningful.
 #
 # `[workspace]` keeps this its own build. Building the two arms together would
 # unify their features and silently give both the C backend.
@@ -13,10 +14,12 @@ publish = false
 [workspace]
 
 [dependencies]
-permessage-deflate = { path = "../.." }
+permessage-deflate = { path = "../..", default-features = false, features = ["zlib-rs"] }
 http = "1"
 
+# The scenario driver builds peer messages with flate2. No backend request, for
+# the same reason as the C arm: one here would mask a forward that forwards
+# nothing.
 [dependencies.flate2]
 version = "1.0.31"
 default-features = false
-features = ["zlib-rs"]

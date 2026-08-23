@@ -18,9 +18,14 @@ with `new_with_window_bits(false, 8)`, whose panic is flate2's own frontend asse
 fires identically under every backend.
 
 The arms share one scenario source, `include!`d rather than made a crate, so they cannot
-drift and neither can be built with the other's backend. The C arm selects its backend the
-way a consumer does -- crate default off, crate `zlib` feature on -- so C is the only
-backend in its graph rather than the one that won a dispatch.
+drift and neither can be built with the other's backend.
+
+Both select their backend **through the crate's own feature**, the way a consumer does, and
+neither asks flate2 for one directly. Two things follow. Each arm's graph holds exactly one
+backend, so nothing has to win a dispatch -- and the dispatch is what inverts below the
+lock. And a forward that forwards nothing fails both arms loudly instead of being masked by
+their own request: measured, with `zlib-rs = []` and `zlib = []` in the crate manifest, both
+arms stop at *"You need to choose a zlib backend"* where both previously stayed green.
 
 ## What each arm is for
 

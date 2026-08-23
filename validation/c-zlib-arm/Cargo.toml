@@ -21,7 +21,9 @@ publish = false
 permessage-deflate = { path = "../..", default-features = false, features = ["zlib"] }
 http = "1"
 
+# The scenario driver builds peer messages with flate2. No backend request: with
+# one, a `zlib` feature that forwarded nothing would still hand this arm a C
+# backend and all seven rows would stay green.
 [dependencies.flate2]
 version = "1.0.31"
 default-features = false
-features = ["zlib"]

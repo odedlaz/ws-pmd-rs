@@ -1,12 +1,15 @@
-# `Decompress::reset` takes no window bits. Both backends reinitialise at their
-# own default of 15 -- the C one spells it out as
-# `inflateReset2(stream, ±MZ_DEFAULT_WINDOW_BITS)` -- so calling it silently
-# discards the negotiated window, and nothing observable changes: the declared
-# width does not affect decoding, only allocation. Rebuild through
-# `InflaterConfig::build` instead, which is the only inflater factory here.
+# `Decompress::reset` takes no window bits, so it reinitialises at the backend
+# default of 15 -- `inflateReset2(stream, ±MZ_DEFAULT_WINDOW_BITS)` on the C
+# backend, `InflateConfig::default()` on zlib-rs. At any narrower width that
+# silently discards the negotiated window; `InflaterConfig` records what the
+# width buys on each backend. `InflaterConfig::reinitialise` picks the route
+# that keeps it, and holds the one call this lint allows.
 #
-# This lint exists because no test can catch the regression. Reverting to
-# `reset` survives the whole suite and every mutant probe.
+# What the lint buys, and what it does not: no test can catch an unconditional
+# revert to `reset`, which is why it exists, but centralising the call is all it
+# proves. Widening `reinitialise`'s condition to always-true goes through this
+# allowed call and stays invisible, so route selection is unguarded rather than
+# un-compilable.
 disallowed-methods = [
-    { path = "flate2::Decompress::reset", reason = "discards the negotiated window; use InflaterConfig::build" },
+    { path = "flate2::Decompress::reset", reason = "reinitialises at 15, discarding a narrower negotiated window; use InflaterConfig::reinitialise" },
 ]

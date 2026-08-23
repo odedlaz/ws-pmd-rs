@@ -126,10 +126,14 @@ impl InflaterConfig {
     /// too, because `reset` frees the narrow window and re-widens to 15 on next
     /// use. flate2 offers no third route.
     ///
-    /// Which of the two runs is unguarded: swapping them survives the whole
-    /// suite. `resets_in_place` is pinned, its use here is not, and nothing
-    /// downstream can see the difference -- the one instrument that can, counting
-    /// the global allocator, needs the `unsafe` this crate forbids.
+    /// Which of the two runs is unguarded, and the reason is backend-dependence
+    /// rather than impossibility. `resets_in_place` is pinned; its use here is
+    /// not, and swapping them survives the whole suite on the pinned backend,
+    /// where the width changes nothing. On a C-zlib build a plain decode
+    /// separates them: after reinitialising at a negotiated 9, a reference past
+    /// 512 bytes is rejected by the rebuild and accepted by the reset, which
+    /// re-widened to 15. A gate whose verdict inverts under feature unification
+    /// is worse than none, so that test stays out and this stays recorded.
     fn reinitialise(self, inflater: &mut Decompress) {
         if self.resets_in_place() {
             #[expect(

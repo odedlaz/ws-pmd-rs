@@ -12,6 +12,17 @@ rust-version = "1.85"
 # see validation/README.md.
 exclude = ["validation"]
 
+# Activation requests, not exclusive guarantees. Cargo unions features across a
+# graph, so naming one here cannot stop a dependent from also turning the other
+# on -- what these buy is the ability for a host to switch the default *off* and
+# choose. Selecting neither is legal when some other edge supplies a backend;
+# flate2 raises its own `compile_error!` when none does, and duplicating that as
+# an exactly-one guard would reject graphs that are valid.
+[features]
+default = ["zlib-rs"]
+zlib-rs = ["flate2/zlib-rs"]
+zlib = ["flate2/zlib"]
+
 [dependencies]
 http = "1"
 thiserror = "2"
@@ -34,7 +45,6 @@ thiserror = "2"
 [dependencies.flate2]
 version = "1.0.31"
 default-features = false
-features = ["zlib-rs"]
 
 # The decoder's tests drive it from an independent `flate2` peer rather than this
 # crate's own encoder, so a shared mistake cannot pass as a round trip.
@@ -47,11 +57,13 @@ features = ["zlib-rs"]
 missing_docs = "warn"
 unsafe_code = "forbid"
 
-# Two invocations, and neither replaces the other. `cargo clippy --locked` is
-# the gate, and it sees production code only, which is what clippy checks by
-# default. `cargo clippy --locked --all-targets` runs in addition, as a
-# superset: it is what caught four `similar_names` in `tests/codec.rs` that the
-# gate by itself cannot see.
+# Three invocations, and none replaces another. `cargo clippy --locked` is the
+# gate, and it sees production code under the default features only.
+# `--all-targets` is a superset over targets: it is what caught four
+# `similar_names` in `tests/codec.rs` that the gate by itself cannot see.
+# `--all-features` is a superset over features, and it became a distinct command
+# the moment this manifest grew a `[features]` table -- before that it was the
+# same run as the gate.
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

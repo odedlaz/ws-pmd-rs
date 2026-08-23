@@ -346,10 +346,10 @@ fn a_zero_ceiling_admits_an_empty_message_and_nothing_else() {
     );
 }
 
-/// Every window RFC 7692 admits on the wire, including the 8 no inflater can be
-/// built for. The peer compresses at the width it agreed to; this side widens to
-/// 9 only where zlib forces it, and a wider inflater accepts every stream a
-/// narrower compressor emits.
+/// Every window RFC 7692 admits on the wire, including the 8 that flate2 will
+/// not construct an inflater for. The peer compresses at the width it agreed
+/// to; this side widens to 9 only where flate2's floor forces it, and a wider
+/// inflater accepts every stream a narrower compressor emits.
 #[test]
 fn every_negotiated_peer_window_round_trips() {
     let payload = b"the quick brown fox jumps over the lazy dog, twice over".repeat(4);

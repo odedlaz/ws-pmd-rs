@@ -230,7 +230,7 @@ impl Decoder {
                 // stays finished and every later message decodes to nothing.
                 self.inflater.reset(false);
             }
-            if !progress(status, consumed, produced)? {
+            if !progress(consumed, produced, !input.is_empty())? {
                 return Ok(());
             }
         }
@@ -244,50 +244,62 @@ fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
     usize::try_from(after.saturating_sub(before)).unwrap_or(buffer_len).min(buffer_len)
 }
 
-/// Whether the backend moved, given what it claimed and what it did.
+/// Whether the backend moved, given what it did and what is left to give it.
 ///
-/// Zero progress reported as success is the stall: the caller would spin on it
-/// forever. Zero progress with `BufError` or `StreamEnd` is ordinary
-/// termination — out of input, out of room, or done.
-const fn progress(status: Status, consumed: usize, produced: usize) -> Result<bool, CodecError> {
+/// Keyed on residual input, not on the status, because no status answers the
+/// question. `Ok` is permitted when more input is unavailable, so treating it
+/// as a stall can fail a conforming backend; and neither `BufError` nor
+/// `StreamEnd` proves the slice was drained, so treating them as ordinary
+/// termination can drop a tail in silence. What distinguishes a stall from an
+/// exit is whether there was anything left for the call to work on.
+const fn progress(
+    consumed: usize,
+    produced: usize,
+    input_remains: bool,
+) -> Result<bool, CodecError> {
     if consumed != 0 || produced != 0 {
         return Ok(true);
     }
-    match status {
-        Status::Ok => Err(CodecError::Stalled),
-        Status::BufError | Status::StreamEnd => Ok(false),
+    if input_remains {
+        return Err(CodecError::Stalled);
     }
+    Ok(false)
 }
 
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a panic is how a test reports")]
 mod tests {
-    use super::{advance, progress, CodecError, Status};
+    use super::{advance, progress, CodecError};
 
-    /// A driven loop cannot prove this: a mutant that deletes the guard makes
-    /// the codec hang, and `cargo test` has no per-test timeout, so the row that
-    /// should go red never finishes. Pinning the pure function instead means the
-    /// same mutant fails a test in milliseconds.
+    /// Exhaustive: three progress shapes against both residual states is the
+    /// whole input space of the function, now that the status is not part of it.
+    ///
+    /// It has to be pinned here because no driven row reaches the two cases that
+    /// matter. Across the suite, every zero-progress point is `BufError` with
+    /// the input drained -- the one combination both the old rule and this one
+    /// answer the same way. So the two mutants worth fearing are invisible to
+    /// the integration tests in opposite ways: deleting the guard makes the
+    /// codec spin, and `cargo test` has no per-test timeout, so the row that
+    /// should go red never finishes; forcing `input_remains` to false makes it
+    /// exit early and drop a tail in silence, with every row still green.
     #[test]
-    fn zero_progress_reported_as_success_is_the_only_stall() {
-        for (status, consumed, produced, expected) in [
-            (Status::Ok, 0, 0, None),
-            (Status::Ok, 1, 0, Some(true)),
-            (Status::Ok, 0, 1, Some(true)),
-            (Status::BufError, 0, 0, Some(false)),
-            (Status::BufError, 1, 0, Some(true)),
-            (Status::BufError, 0, 1, Some(true)),
-            (Status::StreamEnd, 0, 0, Some(false)),
-            (Status::StreamEnd, 1, 0, Some(true)),
-            (Status::StreamEnd, 0, 1, Some(true)),
+    fn a_stall_is_zero_progress_with_input_still_to_read() {
+        for (consumed, produced, input_remains, expected) in [
+            (0, 0, false, Some(false)),
+            (0, 0, true, None),
+            (1, 0, false, Some(true)),
+            (1, 0, true, Some(true)),
+            (0, 1, false, Some(true)),
+            (0, 1, true, Some(true)),
         ] {
-            match (progress(status, consumed, produced), expected) {
+            let got = progress(consumed, produced, input_remains);
+            match (got, expected) {
                 (Ok(got), Some(want)) => {
-                    assert_eq!(got, want, "progress({status:?}, {consumed}, {produced})");
+                    assert_eq!(got, want, "progress({consumed}, {produced}, {input_remains})");
                 }
                 (Err(CodecError::Stalled), None) => {}
                 (got, want) => panic!(
-                    "progress({status:?}, {consumed}, {produced}) gave {got:?}, wanted {want:?}"
+                    "progress({consumed}, {produced}, {input_remains}) gave {got:?}, wanted {want:?}"
                 ),
             }
         }

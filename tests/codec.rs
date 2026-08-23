@@ -11,7 +11,7 @@
     reason = "a panic is how a test reports"
 )]
 
-use flate2::{Compress, Compression, FlushCompress};
+use flate2::{Compress, Compression, FlushCompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
     ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, PmdComposition,
@@ -55,6 +55,18 @@ impl Peer {
         Self(Compress::new_with_window_bits(Compression::default(), false, window_bits))
     }
 
+    /// A peer that emits stored blocks, which a real one does whenever deflating
+    /// would expand the data.
+    ///
+    /// Its first wire byte is `0x00`, and that byte is what separates a corrupt
+    /// inflater state from a rejected one: the trailer misparsed at the start of
+    /// a stream leaves one byte of a length field outstanding, so the next
+    /// message's first byte decides whether the length checks out and 65,280
+    /// bytes of nonsense are copied, or the stream is rejected outright.
+    fn uncompressed() -> Self {
+        Self(Compress::new_with_window_bits(Compression::none(), false, 15))
+    }
+
     /// One complete message: the trailer the RFC strips is stripped.
     fn send(&mut self, payload: &[u8]) -> Vec<u8> {
         let mut wire = self.flush(payload);
@@ -94,6 +106,27 @@ impl Peer {
         assert!(output.ends_with(TRAILER), "the peer must emit a sync-flush trailer");
         output
     }
+}
+
+/// One message from a peer that ended its DEFLATE stream with `BFINAL` rather
+/// than flushing. Nothing is stripped from one of these: RFC 7692 strips the
+/// `Z_SYNC_FLUSH` trailer, and a stream ended this way has none.
+fn bfinal_wire(plain: &[u8]) -> Vec<u8> {
+    let mut ender = Compress::new_with_window_bits(Compression::best(), false, 15);
+    let mut wire = vec![0u8; plain.len() * 2 + 64];
+    assert_eq!(
+        ender.compress(plain, &mut wire, FlushCompress::Finish).expect("one buffer"),
+        Status::StreamEnd,
+        "the whole stream must finish"
+    );
+    wire.truncate(usize::try_from(ender.total_out()).expect("fits"));
+    wire
+}
+
+/// A payload long enough that a corrupted inflater state shows up as wrong bytes
+/// rather than surviving by being too short to matter.
+fn structured_payload(len: u32) -> Vec<u8> {
+    (0..len).map(|i| u8::try_from(i.wrapping_mul(31) % 251).expect("under 251")).collect()
 }
 
 // -------------------------------------------------------- validate-codec-vectors
@@ -174,25 +207,83 @@ fn a_message_after_a_bfinal_message_still_decodes() {
 fn a_message_after_a_byte_aligned_bfinal_message_decodes_exactly() {
     let mut decoder = plain_decoder();
     let first = b"a peer that ends its stream on a byte boundary".to_vec();
-    let mut ender = Compress::new_with_window_bits(Compression::best(), false, 15);
-    let mut wire = vec![0u8; first.len() * 2 + 64];
-    assert_eq!(
-        ender.compress(&first, &mut wire, FlushCompress::Finish).expect("one buffer"),
-        flate2::Status::StreamEnd,
-        "the whole stream must finish"
-    );
-    wire.truncate(usize::try_from(ender.total_out()).expect("fits"));
-    assert_eq!(decoder.decompress(&wire, true, ROOMY).expect("first"), first);
+    assert_eq!(decoder.decompress(&bfinal_wire(&first), true, ROOMY).expect("first"), first);
 
-    // Big enough to carry internal matches, so a corrupted inflater state shows
-    // up as wrong bytes rather than surviving by being too short to matter.
-    let payload: Vec<u8> =
-        (0..4096u32).map(|i| u8::try_from(i.wrapping_mul(31) % 251).expect("under 251")).collect();
+    let payload = structured_payload(4096);
     let second = Peer::new(15).send(&payload);
     assert_eq!(
         decoder.decompress(&second, true, ROOMY).expect("second"),
         payload,
         "the message after a byte-aligned BFINAL must arrive byte-exact"
+    );
+}
+
+/// The same corruption, one fragment later. A peer may end its stream before the
+/// last fragment of a message, and RFC 6455 lets the message end with a
+/// zero-length continuation frame, so the fragment that carries `final_fragment`
+/// need not carry any bytes.
+///
+/// The stream ended in an earlier call, so the inflater was rebuilt there and
+/// sits at the start of a fresh stream by the time the trailer would be fed --
+/// the state `91a927e` closed for a single-fragment message, reached across two.
+#[test]
+fn a_stream_that_ends_before_the_final_fragment_leaves_the_next_message_exact() {
+    let mut decoder = plain_decoder();
+    let first = b"a peer that ends its stream on a byte boundary".to_vec();
+    let mut got = decoder.decompress(&bfinal_wire(&first), false, ROOMY).expect("first fragment");
+    got.extend(decoder.decompress(&[], true, ROOMY).expect("an empty final fragment"));
+    assert_eq!(got, first, "the message whose stream ended early still arrives whole");
+
+    let payload = structured_payload(1024);
+    let second = Peer::uncompressed().send(&payload);
+    assert_eq!(second.first(), Some(&0x00), "the input that tells corruption from rejection");
+    assert_eq!(
+        decoder.decompress(&second, true, ROOMY).expect("second"),
+        payload,
+        "a stream that ended on an earlier fragment must not take the trailer"
+    );
+}
+
+/// A `BFINAL` stream long enough to span several backend calls, so the position
+/// is already set by an earlier call in the same fragment and the stream end has
+/// to clear it. Every other `BFINAL` row here finishes in one call, where the
+/// position was never set and clearing it proves nothing -- and a real
+/// `BFINAL` message is usually the long kind.
+#[test]
+fn a_long_bfinal_message_leaves_the_next_message_exact() {
+    let mut decoder = plain_decoder();
+    let first = structured_payload(100_000);
+    assert_eq!(decoder.decompress(&bfinal_wire(&first), true, ROOMY).expect("first"), first);
+
+    let payload = structured_payload(1024);
+    let second = Peer::uncompressed().send(&payload);
+    assert_eq!(second.first(), Some(&0x00), "the input that tells corruption from rejection");
+    assert_eq!(
+        decoder.decompress(&second, true, ROOMY).expect("second"),
+        payload,
+        "a stream that ended mid-fragment must leave the position with it"
+    );
+}
+
+/// A message that carries no bytes at all never started a stream, so there is
+/// nothing for the trailer to complete and it lands at a stream boundary again.
+///
+/// RFC 7692 section 7.2.3.6 has a peer send `0x00` for an empty message, so no
+/// conforming peer produces this; whether an empty payload should be rejected
+/// outright is a separate question. Either way the state it leaves behind must
+/// not decide what a later message decodes to.
+#[test]
+fn an_empty_final_fragment_leaves_the_next_message_exact() {
+    let mut decoder = plain_decoder();
+    assert!(decoder.decompress(&[], true, ROOMY).expect("an empty message").is_empty());
+
+    let payload = structured_payload(1024);
+    let wire = Peer::uncompressed().send(&payload);
+    assert_eq!(wire.first(), Some(&0x00), "the input that tells corruption from rejection");
+    assert_eq!(
+        decoder.decompress(&wire, true, ROOMY).expect("the next message"),
+        payload,
+        "a message that started no stream must not take the trailer"
     );
 }
 

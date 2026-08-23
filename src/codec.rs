@@ -161,6 +161,9 @@ pub struct Decoder {
     config: InflaterConfig,
     inflater: Decompress,
     reset_between_messages: bool,
+    /// Whether the inflater is part-way through a DEFLATE stream, which is the
+    /// only position where the trailer RFC 7692 strips can be fed back.
+    mid_stream: bool,
     delivered: usize,
     poisoned: bool,
 }
@@ -215,6 +218,7 @@ impl Negotiated {
             config,
             inflater: config.build(),
             reset_between_messages: self.peer_no_context_takeover(),
+            mid_stream: false,
             delivered: 0,
             poisoned: false,
         }
@@ -251,6 +255,17 @@ impl Decoder {
         }
     }
 
+    /// Start the inflater over on a fresh DEFLATE stream.
+    ///
+    /// The position moves with it, and the two cannot be separated: the stripped
+    /// trailer only completes a stream that is part-way through, so forgetting
+    /// the position here is what feeds `00 00 ff ff` to an inflater sitting at
+    /// the start of one.
+    fn reinitialise(&mut self) {
+        self.config.reinitialise(&mut self.inflater);
+        self.mid_stream = false;
+    }
+
     fn decode(
         &mut self,
         input: &[u8],
@@ -258,34 +273,35 @@ impl Decoder {
         limit: DecompressedLimit,
         output: &mut Vec<u8>,
     ) -> Result<(), CodecError> {
-        let ended = self.inflate(input, limit, output)?;
+        self.inflate(input, limit, output)?;
         if final_fragment {
-            // Only a message that was flushed with `Z_SYNC_FLUSH` had a trailer
-            // stripped from it, and only that message needs one fed back. A peer
-            // that ended its stream with `BFINAL` instead has already delivered
-            // everything, and the inflater it left behind was rebuilt -- so it
-            // sits byte-aligned at the start of a stream, where `00 00 ff ff` is
-            // not an empty stored block at all. Feeding it there corrupts the
-            // stream: the four bytes need a preceding partial byte to carry the
-            // three header bits, and byte-aligned they parse as a stored block
-            // with a bogus length.
-            if !ended {
+            // Only a message flushed with `Z_SYNC_FLUSH` had a trailer
+            // stripped from it, and only an inflater part-way through a stream
+            // can take one back. A peer that ended its stream with `BFINAL` has
+            // already delivered everything; a message that carried no bytes
+            // never started a stream. Either way the inflater sits byte-aligned
+            // at the start of one, where the four bytes have no preceding
+            // partial byte to carry their three header bits and parse as a
+            // stored block with a length nobody sent -- a state that then
+            // decides what the *next* message decodes to. So the question is
+            // where the inflater stands, not what this call saw: a stream that
+            // ended on an earlier fragment ended it just as much.
+            if self.mid_stream {
                 self.inflate(TRAILER, limit, output)?;
             }
             if self.reset_between_messages {
-                self.config.reinitialise(&mut self.inflater);
+                self.reinitialise();
             }
         }
         Ok(())
     }
 
-    /// Returns whether the peer's DEFLATE stream ended during these bytes.
     fn inflate(
         &mut self,
         mut input: &[u8],
         limit: DecompressedLimit,
         output: &mut Vec<u8>,
-    ) -> Result<bool, CodecError> {
+    ) -> Result<(), CodecError> {
         let mut scratch = [0u8; SCRATCH];
         loop {
             let produced_so_far = self.delivered.saturating_add(output.len());
@@ -318,17 +334,23 @@ impl Decoder {
                 // does it must start a new stream, which cannot reference the
                 // old window, so resetting mirrors it. Without this the inflater
                 // stays finished and every later message decodes to nothing.
-                self.config.reinitialise(&mut self.inflater);
-                // And stop here. The stream is over, so anything still unread is
-                // this message's padding, and the inflater is now byte-aligned at
-                // the start of a fresh stream. Feeding either the remainder or
-                // the trailer into that state corrupts it -- silently, because
-                // both parse as a stored block with a length nobody sent.
-                return Ok(true);
+                self.reinitialise();
+                // And stop here. The stream is over, so anything still unread
+                // is this message's padding, and feeding it to the fresh
+                // inflater would corrupt the stream the same way the trailer
+                // does at that position.
+                return Ok(());
             }
             match step.remaining {
-                Some(rest) => input = rest,
-                None => return Ok(false),
+                Some(rest) => {
+                    // Consuming a byte is what puts the inflater inside a stream,
+                    // which is the one position where a stripped trailer belongs.
+                    if rest.len() < input.len() {
+                        self.mid_stream = true;
+                    }
+                    input = rest;
+                }
+                None => return Ok(()),
             }
         }
     }
@@ -390,7 +412,7 @@ fn step<'a>(
 }
 
 #[cfg(test)]
-#[expect(clippy::panic, clippy::expect_used, reason = "a panic is how a test reports")]
+#[expect(clippy::expect_used, reason = "a panic is how a test reports")]
 mod tests {
     use flate2::{Compress, Compression, FlushCompress};
 

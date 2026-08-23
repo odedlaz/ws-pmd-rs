@@ -154,7 +154,7 @@ impl Decoder {
             let before = (self.inflater.total_in(), self.inflater.total_out());
             #[expect(
                 clippy::indexing_slicing,
-                reason = "`writable` is min-ed with scratch.len() four lines above"
+                reason = "`writable` is `min`-ed with `scratch.len()` where it is bound"
             )]
             let status = self
                 .inflater

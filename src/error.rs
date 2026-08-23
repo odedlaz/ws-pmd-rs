@@ -5,7 +5,6 @@
 /// Variants stay separate where RFC 7692 section 7 separates them, so a host can
 /// tell a peer that broke the grammar from one that answered with a selection it
 /// was never offered. No compression-backend error is reachable from here.
-///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum NegotiationError {
@@ -56,9 +55,13 @@ pub enum NegotiationError {
     /// narrower than any compressor this side can be built at.
     ///
     /// A *wider* response value is not an error. RFC 7692 section 7.1.2.2 makes
-    /// the offered value a hint the server may ignore, binds the client to it
-    /// regardless of the answer, and puts no MUST NOT on a larger response — so
-    /// the agreement narrows to the offer instead of failing the handshake.
+    /// the offered value a hint the server may ignore and puts no MUST NOT on a
+    /// larger response, so failing the handshake would reject a conforming
+    /// peer. Narrowing to the offer instead is this crate's choice and not the
+    /// RFC's: section 7.2.1 says the offer is "just a hint" and would permit
+    /// compressing up to the agreed value. The offer came from a configured
+    /// local bound, and a setting is not a negotiating position to be dropped
+    /// because the peer turned out to allow more.
     #[error("client_max_window_bits is below the 9-bit floor a compressor needs")]
     ClientWindowTooNarrow,
 
@@ -74,8 +77,9 @@ pub enum NegotiationError {
     OfferCollision,
 
     /// The server selected `permessage-deflate` against a request that never
-    /// offered it. RFC 7692 section 7.1 lets a server select only from what the
-    /// client offered, so this is the peer breaking the protocol.
+    /// offered it. RFC 6455 section 9: "A server MUST NOT respond with any
+    /// extension not requested by the client." RFC 7692 section 5 puts the
+    /// matching MUST on this side -- fail the connection.
     #[error("the response selected permessage-deflate, which was never offered")]
     UnsolicitedExtension,
 

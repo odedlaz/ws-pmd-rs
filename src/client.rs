@@ -101,11 +101,12 @@ impl ClientOffer {
 impl ClientHandshake {
     /// Seal a request that deliberately carries no `permessage-deflate` offer.
     ///
-    /// RFC 7692 section 7.1 lets a server select only an extension the client
-    /// offered, so a selection made against no offer is the peer breaking the
-    /// protocol and the client is the only side that can see it. Without this
-    /// entry the crate never sees such a request -- it only ever holds state it
-    /// installed into -- and the rule would fall to every host separately.
+    /// RFC 6455 section 9 forbids a server responding with an extension the
+    /// client did not request, and RFC 7692 section 5 makes failing the
+    /// connection this side's MUST when one does. The client is the only side
+    /// that can see it, and without this entry the crate never sees such a
+    /// request -- it only ever holds state it installed into -- so the rule
+    /// would fall to every host separately.
     ///
     /// Fails with [`OfferCollision`](NegotiationError::OfferCollision) if the
     /// request does carry an offer, because then this is the wrong state for
@@ -186,10 +187,11 @@ impl SealedOffer {
             ClientWindow::Bits(bits) if bits < 9 => {
                 return Err(NegotiationError::ClientWindowTooNarrow)
             }
-            // The offered value is a hint (RFC 7692 section 7.1.2.2). A server
-            // may answer wider or ignore it, and the client stays bound to what
-            // it offered either way, so the agreement is the narrower of the
-            // two rather than a failed handshake.
+            // A wider answer is conforming: the offer is a hint the server may
+            // ignore (RFC 7692 section 7.1.2.2), so rejecting it would fail a
+            // legal peer. Holding to the offer anyway is policy, not the RFC --
+            // section 7.2.1 would permit the agreed value -- and the policy is
+            // that a configured bound stays configured.
             ClientWindow::Bits(bits) => bits.min(offered_client),
             // Unanswered means unconstrained by the server, so this side holds
             // itself to the bound it advertised.

@@ -38,6 +38,10 @@
 //! # Ok::<(), permessage_deflate::NegotiationError>(())
 //! ```
 //!
+//! A client that deliberately offered nothing seals that fact instead, with
+//! [`ClientHandshake::seal_without_offer`], and gets an error rather than an
+//! agreement if the server selects `permessage-deflate` anyway.
+//!
 //! A server selects an alternative, hands the host the exact response element,
 //! and commits only once that element survived the host's own callbacks.
 //!

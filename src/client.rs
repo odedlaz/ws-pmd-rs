@@ -7,6 +7,11 @@
 //! Nothing here consults [`ClientConfig`] to decide what went on the wire — the
 //! sealed offer is the record, because a host is free to rewrite headers after
 //! the crate has installed them.
+//!
+//! A host that deliberately offered nothing enters at
+//! [`ClientHandshake::seal_without_offer`], which proves that and nothing else.
+//! The same `finish` then reports an unsolicited selection rather than an
+//! agreement, so the RFC rule is closed once here instead of in every host.
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 
@@ -25,10 +30,17 @@ pub struct ClientOffer {
     installed: HeaderValue,
 }
 
-/// An offer that has been confirmed against the exact request headers leaving
-/// the host. Only this value can finish a handshake.
+/// A request confirmed against the exact headers leaving the host. Only this
+/// value can finish a handshake, whether or not it carries an offer.
 #[derive(Debug, Clone)]
 pub struct ClientHandshake {
+    /// `None` once [`seal_without_offer`](ClientHandshake::seal_without_offer)
+    /// has proved the request carried no offer at all.
+    offer: Option<SealedOffer>,
+}
+
+#[derive(Debug, Clone)]
+struct SealedOffer {
     config: ClientConfig,
     sealed: HeaderValue,
 }
@@ -79,15 +91,36 @@ impl ClientOffer {
         if found != 1 {
             return Err(NegotiationError::OfferAltered);
         }
-        Ok(ClientHandshake { config: self.config, sealed: self.installed })
+        Ok(ClientHandshake {
+            offer: Some(SealedOffer { config: self.config, sealed: self.installed }),
+        })
     }
 }
 
 impl ClientHandshake {
-    /// The offer that crossed the send boundary.
+    /// Seal a request that deliberately carries no `permessage-deflate` offer.
+    ///
+    /// RFC 7692 section 7.1 lets a server select only an extension the client
+    /// offered, so a selection made against no offer is the peer breaking the
+    /// protocol and the client is the only side that can see it. Without this
+    /// entry the crate never sees such a request -- it only ever holds state it
+    /// installed into -- and the rule would fall to every host separately.
+    ///
+    /// Fails with [`OfferCollision`](NegotiationError::OfferCollision) if the
+    /// request does carry an offer, because then this is the wrong state for
+    /// these headers and the check that follows would be answering about a
+    /// request that does not exist.
+    pub fn seal_without_offer(headers: &HeaderMap) -> Result<Self, NegotiationError> {
+        if contains_deflate(headers)? {
+            return Err(NegotiationError::OfferCollision);
+        }
+        Ok(Self { offer: None })
+    }
+
+    /// The offer that crossed the send boundary, if the request carried one.
     #[must_use]
-    pub fn value(&self) -> &HeaderValue {
-        &self.sealed
+    pub fn value(&self) -> Option<&HeaderValue> {
+        self.offer.as_ref().map(|offer| &offer.sealed)
     }
 
     /// Apply the response to the sealed offer.
@@ -104,12 +137,21 @@ impl ClientHandshake {
         let Some(params) = sole_deflate(headers)? else {
             return Ok(None);
         };
+        // A selection against no offer outranks a composition report, the same
+        // way a rewritten response does on the server side: the peer broke the
+        // protocol, and the host's account of its own extension set cannot
+        // change that or make an agreement out of it.
+        let Some(offer) = self.offer else {
+            return Err(NegotiationError::UnsolicitedExtension);
+        };
         if composition == PmdComposition::Conflict {
             return Err(NegotiationError::ExtensionConflict);
         }
-        self.agree(params).map(Some)
+        offer.agree(params).map(Some)
     }
+}
 
+impl SealedOffer {
     /// RFC 7692 section 7.1: the response refines the offer or the handshake fails.
     fn agree(&self, params: Params) -> Result<Negotiated, NegotiationError> {
         if self.config.requires_server_no_context_takeover() && !params.server_no_context_takeover {

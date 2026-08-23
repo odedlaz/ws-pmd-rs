@@ -6,11 +6,6 @@
 /// tell a peer that broke the grammar from one that answered with a selection it
 /// was never offered. No compression-backend error is reachable from here.
 ///
-/// There is no "unsolicited selection" variant. A response can only be applied
-/// through a sealed offer, so with the single alternative version 0.1 emits, a
-/// selection that was never offered is always some specific disagreement with
-/// that offer and is reported as that. Offering ordered alternatives would make
-/// the distinction real and reintroduce it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum NegotiationError {
@@ -72,10 +67,17 @@ pub enum NegotiationError {
     #[error("client_max_window_bits must carry a value in a response")]
     ClientWindowValueless,
 
-    /// The request already carried a caller-installed `permessage-deflate` offer
-    /// when the crate was asked to install its own.
+    /// The request already carried a caller-installed `permessage-deflate`
+    /// offer when the crate was asked to install its own, or to seal a request
+    /// as carrying none.
     #[error("the request already carries a permessage-deflate offer")]
     OfferCollision,
+
+    /// The server selected `permessage-deflate` against a request that never
+    /// offered it. RFC 7692 section 7.1 lets a server select only from what the
+    /// client offered, so this is the peer breaking the protocol.
+    #[error("the response selected permessage-deflate, which was never offered")]
+    UnsolicitedExtension,
 
     /// The request that reached the send boundary no longer carries exactly the
     /// offer that was installed: it was removed, rewritten, or duplicated.

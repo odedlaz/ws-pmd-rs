@@ -3,8 +3,8 @@
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
-    ClientConfig, ClientOffer, ConfigError, Negotiated, NegotiationError, PmdComposition,
-    ServerConfig, ServerHandshake,
+    ClientConfig, ClientHandshake, ClientOffer, ConfigError, Negotiated, NegotiationError,
+    PmdComposition, ServerConfig, ServerHandshake,
 };
 
 fn headers(values: &[&[u8]]) -> HeaderMap {
@@ -426,6 +426,76 @@ fn sealing_accepts_the_offer_beside_an_unrelated_extension() {
     let offer = ClientOffer::install(ClientConfig::new(), &mut request).expect("fresh");
     request.append(SEC_WEBSOCKET_EXTENSIONS, HeaderValue::from_static("x-other; a=1"));
     offer.seal(&request).expect("an unrelated extension does not disturb the offer");
+}
+
+// ----------------------------------------------------- the no-offer workflow
+
+/// RFC 7692 section 7.1: a server may select only from what the client offered.
+/// A client that offered nothing is the only side that can catch a selection
+/// anyway, and before `seal_without_offer` the crate had no state for it -- the
+/// rule fell to every host separately.
+#[test]
+fn a_selection_against_no_offer_is_unsolicited() {
+    let error = ClientHandshake::seal_without_offer(&headers(&[b"x-other"]))
+        .expect("the request carries no offer")
+        .finish(&headers(&[b"permessage-deflate"]), PmdComposition::Compatible)
+        .expect_err("the server selected what was never offered");
+    assert_eq!(error, NegotiationError::UnsolicitedExtension);
+}
+
+#[test]
+fn no_offer_and_no_selection_is_an_ordinary_declined_connection() {
+    for response in [&[b"x-other" as &[u8]] as &[&[u8]], &[]] {
+        let agreed = ClientHandshake::seal_without_offer(&headers(&[]))
+            .expect("the request carries no offer")
+            .finish(&headers(response), PmdComposition::Compatible)
+            .expect("no selection is a normal outcome");
+        assert!(agreed.is_none());
+    }
+}
+
+/// The peer breaking the protocol outranks the host's account of its own
+/// extension set, matching the server side, where a rewritten response outranks
+/// a conflict. Without this row the conflict arm could widen to both states.
+#[test]
+fn an_unsolicited_selection_outranks_a_composition_conflict() {
+    let error = ClientHandshake::seal_without_offer(&headers(&[]))
+        .expect("the request carries no offer")
+        .finish(&headers(&[b"permessage-deflate"]), PmdComposition::Conflict)
+        .expect_err("both faults are present");
+    assert_eq!(error, NegotiationError::UnsolicitedExtension);
+}
+
+#[test]
+fn sealing_without_an_offer_rejects_a_request_that_has_one() {
+    let error = ClientHandshake::seal_without_offer(&headers(&[b"permessage-deflate"]))
+        .expect_err("this is the wrong state for these headers");
+    assert_eq!(error, NegotiationError::OfferCollision);
+}
+
+#[test]
+fn the_no_offer_path_still_reads_the_response_grammar() {
+    let error = ClientHandshake::seal_without_offer(&headers(&[]))
+        .expect("the request carries no offer")
+        .finish(&headers(&[br#"x-other; note="open"#]), PmdComposition::Compatible)
+        .expect_err("the element boundaries are unknowable");
+    assert_eq!(error, NegotiationError::MalformedHeader);
+}
+
+#[test]
+fn only_a_sealed_offer_reports_a_value() {
+    assert!(ClientHandshake::seal_without_offer(&headers(&[]))
+        .expect("no offer")
+        .value()
+        .is_none());
+
+    let mut request = HeaderMap::new();
+    let offer = ClientOffer::install(ClientConfig::new(), &mut request).expect("fresh");
+    let sealed = offer.seal(&request).expect("unchanged");
+    assert_eq!(
+        sealed.value().expect("an offered handshake reports it"),
+        "permessage-deflate; client_max_window_bits"
+    );
 }
 
 // --------------------------------------------------------- validate-server-matrix

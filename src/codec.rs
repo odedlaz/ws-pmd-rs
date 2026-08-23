@@ -23,9 +23,10 @@ const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 /// One hard constraint: at least 1. The ceiling detector asks the backend for
 /// one byte past the remaining allowance, so a zero-length buffer makes every
 /// call produce nothing and the stall guard reports a backend that never
-/// moved. Measured, not argued: against the 31-row codec suite at this commit, a
-/// scratch of 0 fails 29 of them, and 1, 16 and 4096 each pass all 31. Counts go
-/// stale as rows are added, so they belong to the rev that measured them.
+/// moved. Measured, not argued: a scratch of 0 fails nearly every row of the
+/// codec suite, and 1, 16 and 4096 each pass all of it. Exact tallies go stale
+/// the next time a row is added, so they belong to the commit that measured
+/// them and not here.
 /// Everything above 1 trades backend round trips against stack, and correctness
 /// does not depend on where in that range this sits. 4096 is the value the
 /// extraction source used.
@@ -514,6 +515,52 @@ mod tests {
         let produced_only = step(&mut runner, &[], &mut scratch).expect("output is still owed");
         assert!(produced_only.produced > 0, "the backend owes output with no input left");
         assert_eq!(produced_only.remaining, Some(&[][..]), "producing is progress");
+    }
+
+    /// The `flate2` property the `stream_open` widening classification leans on:
+    /// at a stream start, output cannot arrive before input is taken.
+    ///
+    /// `inflate` opens the position only on a step that consumed, and widening
+    /// that to any step that made progress is equivalent only because producing
+    /// without consuming needs bytes an earlier call already took -- which
+    /// already opened the position. That last link is the backend's contract,
+    /// not this crate's code, so it is the whole residual risk in that
+    /// classification -- asserted here rather than argued, so a dep bump that
+    /// breaks it fails a row instead of silently retiring the reasoning. The row
+    /// above is the known positive: once the stream is open, a call with no
+    /// input left does produce.
+    ///
+    /// Both reinitialisation routes run, since only the width decides which, and
+    /// the scratch widths vary the room the backend is offered, since a spurious
+    /// production needs somewhere to land. No call here reaches the starved regime
+    /// the widened arm needs -- that one is mid-stream, with output owed. This
+    /// reaches `step` directly, so it holds only for the backend this workspace
+    /// resolves: the validation arms see the public API, where the property is
+    /// not observable, and a C-zlib divergence in it would go unguarded here.
+    #[test]
+    fn output_cannot_precede_input_at_a_stream_start() {
+        let wire = raw_deflate(b"hello, hello, hello");
+        for peer in 8..=15u8 {
+            let config = InflaterConfig::for_peer_window(peer);
+            let route = if config.resets_in_place() { "reset" } else { "rebuild" };
+            for width in [1usize, 2, 4096] {
+                let mut scratch = vec![0u8; width];
+
+                let mut fresh = config.build();
+                let idle =
+                    step(&mut fresh, &[], &mut scratch).expect("an idle call is not a stall");
+                assert_eq!(idle.produced, 0, "built at peer {peer}, scratch {width}");
+
+                // Run a message through first, so the reinitialisation under
+                // test is the one production performs and not a second build.
+                let mut used = config.build();
+                let opened = step(&mut used, &wire, &mut scratch).expect("the wire decodes");
+                assert!(opened.produced > 0, "the run-up produced at peer {peer}, scratch {width}");
+                config.reinitialise(&mut used);
+                let idle = step(&mut used, &[], &mut scratch).expect("an idle call is not a stall");
+                assert_eq!(idle.produced, 0, "{route} at peer {peer}, scratch {width}");
+            }
+        }
     }
 
     /// Which reinitialisation route each negotiable width takes.

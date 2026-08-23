@@ -57,10 +57,15 @@ pub enum NegotiationError {
     #[error("server_max_window_bits exceeds the offered bound")]
     ServerWindowTooLarge,
 
-    /// The response set `client_max_window_bits` to a value the client never
-    /// offered, or below the 9-bit floor its compressor can be built at.
-    #[error("client_max_window_bits was not offered")]
-    ClientWindowNotOffered,
+    /// The response demanded a `client_max_window_bits` below 9, which is
+    /// narrower than any compressor this side can be built at.
+    ///
+    /// A *wider* response value is not an error. RFC 7692 section 7.1.2.2 makes
+    /// the offered value a hint the server may ignore, binds the client to it
+    /// regardless of the answer, and puts no MUST NOT on a larger response — so
+    /// the agreement narrows to the offer instead of failing the handshake.
+    #[error("client_max_window_bits is below the 9-bit floor a compressor needs")]
+    ClientWindowTooNarrow,
 
     /// The response carried a valueless `client_max_window_bits`. The valueless
     /// form is an offer-only signal; a response must state the chosen width.

@@ -276,12 +276,25 @@ fn a_widened_server_window_is_rejected() {
     assert_eq!(error, NegotiationError::ServerWindowTooLarge);
 }
 
+/// RFC 7692 section 7.1.2.2: the offered value is a hint, the server may answer
+/// wider or ignore it, and the client stays bound to its own offer regardless.
+/// Failing here would reject a conforming server.
 #[test]
-fn an_unoffered_client_window_is_rejected() {
+fn a_response_wider_than_the_client_hint_narrows_to_the_hint() {
     let config = ClientConfig::new().client_max_window_bits(10).expect("legal");
-    let error = client_round_trip(config, &[b"permessage-deflate; client_max_window_bits=12"])
-        .expect_err("12 exceeds the offered 10");
-    assert_eq!(error, NegotiationError::ClientWindowNotOffered);
+    let agreed = client_round_trip(config, &[b"permessage-deflate; client_max_window_bits=12"])
+        .expect("a wider answer is conforming")
+        .expect("the server selected it");
+    assert_eq!(agreed.local_max_window_bits(), 10);
+}
+
+#[test]
+fn a_response_narrower_than_the_client_hint_is_installed_as_sent() {
+    let config = ClientConfig::new().client_max_window_bits(12).expect("legal");
+    let agreed = client_round_trip(config, &[b"permessage-deflate; client_max_window_bits=10"])
+        .expect("a narrower answer is conforming")
+        .expect("the server selected it");
+    assert_eq!(agreed.local_max_window_bits(), 10);
 }
 
 #[test]
@@ -289,7 +302,7 @@ fn a_client_window_below_the_buildable_floor_is_rejected() {
     let error =
         client_round_trip(ClientConfig::new(), &[b"permessage-deflate; client_max_window_bits=8"])
             .expect_err("no local compressor can be built at 8");
-    assert_eq!(error, NegotiationError::ClientWindowNotOffered);
+    assert_eq!(error, NegotiationError::ClientWindowTooNarrow);
 }
 
 #[test]

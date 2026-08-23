@@ -139,10 +139,14 @@ impl ClientHandshake {
         let offered_client = self.config.offered_client_max_window_bits();
         let client_max_window_bits = match params.client_max_window_bits {
             ClientWindow::Valueless => return Err(NegotiationError::ClientWindowValueless),
-            ClientWindow::Bits(bits) if bits > offered_client || bits < 9 => {
-                return Err(NegotiationError::ClientWindowNotOffered)
+            ClientWindow::Bits(bits) if bits < 9 => {
+                return Err(NegotiationError::ClientWindowTooNarrow)
             }
-            ClientWindow::Bits(bits) => bits,
+            // The offered value is a hint (RFC 7692 section 7.1.2.2). A server
+            // may answer wider or ignore it, and the client stays bound to what
+            // it offered either way, so the agreement is the narrower of the
+            // two rather than a failed handshake.
+            ClientWindow::Bits(bits) => bits.min(offered_client),
             // Unanswered means unconstrained by the server, so this side holds
             // itself to the bound it advertised.
             ClientWindow::Absent => offered_client,

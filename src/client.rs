@@ -134,6 +134,7 @@ impl ClientHandshake {
         headers: &HeaderMap,
         composition: PmdComposition,
     ) -> Result<Option<Negotiated>, NegotiationError> {
+        grammar::validate(headers)?;
         let Some(params) = sole_deflate(headers)? else {
             return Ok(None);
         };

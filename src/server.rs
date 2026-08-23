@@ -3,7 +3,12 @@
 //! A server reads alternatives in the order the client wrote them and takes the
 //! first it can support. Declining is not failing: an offer this crate cannot
 //! honour leaves the connection uncompressed, which is always a legal outcome.
-//! Only a response that contradicts what the server itself proposed is an error.
+//!
+//! A malformed request header is a different thing from an unsupportable offer,
+//! and the two must not share an answer. RFC 6455 section 9.1 puts a MUST on the
+//! recipient of malformed data, and in a sans-io crate the host is the
+//! recipient, so hiding the condition behind "not offered" would make that MUST
+//! unsatisfiable for every host.
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 
@@ -24,27 +29,28 @@ pub struct ServerHandshake {
 impl ServerHandshake {
     /// Choose the first supportable `permessage-deflate` alternative.
     ///
-    /// Returns `None` when the request offers none, offers only alternatives
-    /// this configuration cannot honour, or carries a `Sec-WebSocket-Extensions`
-    /// value that does not parse. A server declines rather than rejecting the
-    /// whole upgrade, because refusing a connection over an extension it was
-    /// never going to use turns a malformed header into a denial of service.
-    #[must_use]
-    pub fn accept(config: ServerConfig, headers: &HeaderMap) -> Option<Self> {
+    /// `Ok(None)` is a decline, and the ordinary outcome when the request offers
+    /// no `permessage-deflate` or offers only alternatives this configuration
+    /// cannot honour. The connection proceeds uncompressed.
+    ///
+    /// `Err` is the other thing entirely: the request's
+    /// `Sec-WebSocket-Extensions` field does not conform to the RFC 6455
+    /// section 9.1 grammar. The host must fail the opening handshake, and this
+    /// crate must not recommend declining instead, because §9.1's MUST is on
+    /// the recipient and the host is the recipient.
+    ///
+    /// The whole field is checked before any alternative is chosen. An offer
+    /// this server would happily take does not excuse malformed syntax written
+    /// after it, on the same line or on a later one.
+    pub fn accept(
+        config: ServerConfig,
+        headers: &HeaderMap,
+    ) -> Result<Option<Self>, NegotiationError> {
+        grammar::validate(headers)?;
         for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
-            let Ok(elements) = grammar::elements(value.as_bytes()) else {
-                return None;
-            };
-            for element in elements {
-                if grammar::is_blank(element) {
+            for element in grammar::elements(value.as_bytes())? {
+                if grammar::is_blank(element) || !grammar::is_deflate(element)? {
                     continue;
-                }
-                match grammar::is_deflate(element) {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    // Unreadable bytes get no answer. This signature has no
-                    // shape in which to say so, so it declines instead.
-                    Err(_) => return None,
                 }
                 // A single unsupported alternative declines itself; the client
                 // may have written a weaker one after it.
@@ -52,11 +58,11 @@ impl ServerHandshake {
                     continue;
                 };
                 if let Some(accepted) = select(config, offer) {
-                    return Some(accepted);
+                    return Ok(Some(accepted));
                 }
             }
         }
-        None
+        Ok(None)
     }
 
     /// The exact response element the host must emit for this selection.

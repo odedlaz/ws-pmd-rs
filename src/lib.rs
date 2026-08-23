@@ -45,6 +45,20 @@
 //! A server selects an alternative, hands the host the exact response element,
 //! and commits only once that element survived the host's own callbacks.
 //!
+//! # Malformed headers
+//!
+//! Both receive points -- [`ServerHandshake::accept`] for a request and
+//! [`ClientHandshake::finish`] for a response -- check the whole
+//! `Sec-WebSocket-Extensions` field against the RFC 6455 section 9.1 grammar
+//! before interpreting any of it, including extension elements this crate knows
+//! nothing about. A `MalformedHeader` error means the host must fail the
+//! opening handshake, which is what section 9.1 requires of the recipient; it
+//! is not a decline and must not be handled as one. Declining is `Ok(None)`.
+//!
+//! Extension and parameter names are compared exactly. Neither RFC asks for
+//! case folding here, so `Permessage-Deflate` is a conforming extension name
+//! that this crate does not implement -- `Ok(None)`, not an error.
+//!
 //! # Windows
 //!
 //! RFC 7692 names its parameters after the server and the client. Which one is

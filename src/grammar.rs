@@ -1,9 +1,12 @@
 //! The `Sec-WebSocket-Extensions` grammar, over raw bytes.
 //!
-//! Header values are parsed as bytes and never decoded to `str` before the
-//! extension token has been classified. An unrelated extension may legally carry
-//! any byte a `HeaderValue` admits, including non-UTF-8, and must not fail this
-//! crate's parse merely by sitting next to `permessage-deflate`.
+//! Header values are parsed as bytes and never decoded to `str`. Isolation from
+//! an unrelated extension means this crate does not *interpret* it, not that it
+//! accepts bad syntax from it: RFC 6455 section 9.1 puts a MUST on the recipient
+//! of any non-conforming value, whichever extension it names, so
+//! [`validate`] checks the whole field before anything is selected.
+
+use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap};
 
 use crate::error::NegotiationError;
 
@@ -66,20 +69,82 @@ pub fn trim(value: &[u8]) -> &[u8] {
 
 /// Whether this element names `permessage-deflate`.
 ///
-/// Case-folded by decision, not by HTTP: RFC 6455 defines `extension-token` as
-/// an RFC 2616 `token` and says nothing about how to compare one, and HTTP
-/// field *values* are case-sensitive by default. The leniency mirrors the
-/// extraction source.
+/// Compared exactly. RFC 6455 defines the term *ASCII case-insensitive* and
+/// applies it where it means it -- the `Upgrade` value, the section 4.1 client
+/// checks -- and never to `Sec-WebSocket-Extensions` tokens; RFC 7692 contains
+/// no case language at all. `Permessage-Deflate` is therefore a conforming
+/// extension name that is simply not this one, not a malformed one.
 pub fn is_deflate(element: &[u8]) -> Result<bool, NegotiationError> {
     let segments = segments(element)?;
     let name = segments.first().copied().unwrap_or_default();
-    Ok(trim(name).eq_ignore_ascii_case(NAME.as_bytes()))
+    Ok(trim(name) == NAME.as_bytes())
 }
 
 /// Whether an element is entirely whitespace, which an empty list position
 /// produces and which RFC 7230 list rules permit.
 pub fn is_blank(element: &[u8]) -> bool {
     trim(element).is_empty()
+}
+
+/// Check the whole `Sec-WebSocket-Extensions` field against RFC 6455 section
+/// 9.1, before any element is interpreted or selected.
+///
+/// Every field line and every element in it, including extensions this crate
+/// knows nothing about. A conforming element after a malformed one does not
+/// rescue the field, and a supportable offer before one does not hide it --
+/// which is why this is a pre-pass rather than a check folded into selection.
+pub fn validate(headers: &HeaderMap) -> Result<(), NegotiationError> {
+    let mut present = false;
+    let mut populated = false;
+    for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
+        present = true;
+        for element in elements(value.as_bytes())? {
+            if is_blank(element) {
+                continue;
+            }
+            populated = true;
+            validate_element(element)?;
+        }
+    }
+    // `extension-list = 1#extension`. The list rule permits empty positions but
+    // not a list made only of them, so a field that is present and contributes
+    // no element is malformed rather than equivalent to an absent header.
+    if present && !populated {
+        return Err(NegotiationError::MalformedHeader);
+    }
+    Ok(())
+}
+
+/// `extension = extension-token *( ";" extension-param )`.
+fn validate_element(element: &[u8]) -> Result<(), NegotiationError> {
+    let segments = segments(element)?;
+    let (name, parameters) = segments.split_first().ok_or(NegotiationError::MalformedHeader)?;
+    validate_token(trim(name))?;
+    for parameter in parameters {
+        let (name, value) = split_parameter(parameter);
+        validate_token(trim(name))?;
+        if let Some(value) = value {
+            // Section 9.1: "the value after quoted-string unescaping MUST
+            // conform to the 'token' ABNF". Both spellings reduce to a token.
+            validate_token(&unquote(trim(value))?)?;
+        }
+    }
+    Ok(())
+}
+
+/// RFC 2616 `token`: `1*<any CHAR except CTLs or separators>`.
+fn validate_token(value: &[u8]) -> Result<(), NegotiationError> {
+    if value.is_empty() || !value.iter().copied().all(is_tchar) {
+        return Err(NegotiationError::MalformedHeader);
+    }
+    Ok(())
+}
+
+/// The separators excluded here are `()<>@,;:\"/[]?={}`, space and horizontal
+/// tab; CTLs and any byte above 127 are excluded by the ranges themselves.
+const fn is_tchar(byte: u8) -> bool {
+    matches!(byte, b'!' | b'#'..=b'\'' | b'*' | b'+' | b'-' | b'.'
+        | b'0'..=b'9' | b'A'..=b'Z' | b'^'..=b'z' | b'|' | b'~')
 }
 
 /// The valueless form of `client_max_window_bits` is meaningful on its own: in an
@@ -120,23 +185,28 @@ pub fn parse_params(element: &[u8]) -> Result<Params, NegotiationError> {
 
     for segment in segments.iter().skip(1) {
         let (name, value) = split_parameter(segment);
-        let name = trim(name);
 
-        if name.eq_ignore_ascii_case(b"server_no_context_takeover") {
-            set_once(&mut server_takeover, no_value(value)?)?;
-        } else if name.eq_ignore_ascii_case(b"client_no_context_takeover") {
-            set_once(&mut client_takeover, no_value(value)?)?;
-        } else if name.eq_ignore_ascii_case(b"server_max_window_bits") {
-            let value = value.ok_or(NegotiationError::ParameterArity)?;
-            set_once(&mut server_window, parse_bits(value)?)?;
-        } else if name.eq_ignore_ascii_case(b"client_max_window_bits") {
-            let window = match value {
-                Some(value) => ClientWindow::Bits(parse_bits(value)?),
-                None => ClientWindow::Valueless,
-            };
-            set_once(&mut client_window, window)?;
-        } else {
-            return Err(NegotiationError::UnknownParameter);
+        // Exact, for the same reason the extension name is. An unregistered
+        // spelling is an unknown parameter, which declines the alternative.
+        match trim(name) {
+            b"server_no_context_takeover" => {
+                set_once(&mut server_takeover, no_value(value)?)?;
+            }
+            b"client_no_context_takeover" => {
+                set_once(&mut client_takeover, no_value(value)?)?;
+            }
+            b"server_max_window_bits" => {
+                let value = value.ok_or(NegotiationError::ParameterArity)?;
+                set_once(&mut server_window, parse_bits(value)?)?;
+            }
+            b"client_max_window_bits" => {
+                let window = match value {
+                    Some(value) => ClientWindow::Bits(parse_bits(value)?),
+                    None => ClientWindow::Valueless,
+                };
+                set_once(&mut client_window, window)?;
+            }
+            _ => return Err(NegotiationError::UnknownParameter),
         }
     }
 
@@ -215,4 +285,29 @@ fn unquote(value: &[u8]) -> Result<Vec<u8>, NegotiationError> {
         }
     }
     Err(NegotiationError::MalformedHeader)
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, reason = "a panic is how a test reports")]
+mod tests {
+    use super::{elements, NegotiationError};
+
+    /// Quote-aware delimiting became unobservable through the public API when
+    /// the whole field started being validated: a conforming parameter value
+    /// unescapes to a `token`, which admits neither `,` nor `;`, so every input
+    /// where the two behaviours disagree is malformed under both of them. A
+    /// mutant that ignores quotes entirely survives every driven row. So the
+    /// splitter is pinned here instead, the same way `progress` is.
+    #[test]
+    fn a_delimiter_inside_a_quoted_string_does_not_split_the_list() {
+        let parts = elements(br#"x-other; note="a, permessage-deflate", y"#)
+            .expect("the quoting is balanced");
+        assert_eq!(parts.len(), 2, "only the comma outside the quotes separates elements");
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_close_the_string() {
+        let error = elements(br#"x-other; note="a\", b"#).expect_err("the string never closes");
+        assert_eq!(error, NegotiationError::MalformedHeader);
+    }
 }

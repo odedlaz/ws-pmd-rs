@@ -68,48 +68,80 @@ fn resolves_a_quoted_pair_inside_a_window_value() {
     assert_eq!(agreed.peer_max_window_bits(), 12);
 }
 
+/// A quoted comma can no longer produce a *selection* under any behaviour: the
+/// value unescapes to something with commas and spaces in it, which is not a
+/// `token`, so the field is malformed however it was split. What this row still
+/// holds is that the answer is the error and never the selection inside the
+/// quotes that the peer never made.
 #[test]
-fn a_comma_inside_quotes_does_not_split_the_list() {
-    // Quote-unaware splitting cuts this into two elements and finds a
-    // `permessage-deflate` selection *inside* a quoted string the peer never
-    // made. There is one element here, and its name is not permessage-deflate.
-    let selected = client_round_trip(
+fn a_quoted_comma_never_manufactures_a_selection() {
+    let error = client_round_trip(
         ClientConfig::new(),
         &[br#"x-other; note="a, permessage-deflate; server_max_window_bits=9""#],
     )
-    .expect("one unrelated element parses cleanly");
-    assert!(selected.is_none(), "a quoted comma must not manufacture a selection");
+    .expect_err("the unescaped value is not a token");
+    assert_eq!(error, NegotiationError::MalformedHeader);
 }
 
+/// Isolation is about not *interpreting* an unrelated extension, not about
+/// accepting bad syntax from one. RFC 6455 section 9.1's MUST attaches to any
+/// non-conforming received value, and `token` admits no byte above 127, so a
+/// conforming `permessage-deflate` beside it does not rescue the field.
 #[test]
-fn an_unrelated_extension_may_carry_non_utf8_bytes() {
-    let agreed =
+fn an_unrelated_extension_carrying_non_token_bytes_is_malformed() {
+    let error =
         client_round_trip(ClientConfig::new(), &[b"x-binary; tag=\xff\xfe, permessage-deflate"])
-            .expect("only the permessage-deflate element is decoded")
-            .expect("the server selected it");
-    assert_eq!(agreed.peer_max_window_bits(), 15);
+            .expect_err("0xff is not a token character");
+    assert_eq!(error, NegotiationError::MalformedHeader);
 }
 
 #[test]
 fn an_unrelated_extension_may_use_every_token_character() {
+    // The guard against over-rejection, which is the failure direction a new
+    // validator actually has. Every byte here is `tchar`, so a validator that
+    // is even slightly too narrow fails a conforming field.
     let agreed = client_round_trip(
         ClientConfig::new(),
         &[br"x-!#$%&'*+-.^_`|~; weird=1, permessage-deflate"],
     )
-    .expect("unrelated extensions are not validated")
+    .expect("every one of these bytes is a token character")
     .expect("the server selected it");
     assert_eq!(agreed.peer_max_window_bits(), 15);
 }
 
+/// `exact-tokens`: RFC 6455 defines *ASCII case-insensitive* and applies it
+/// where it means it, never to these tokens; RFC 7692 has no case language at
+/// all. So a mixed-case spelling is conforming `token` syntax naming an
+/// extension nobody registered -- `Ok(None)`, never `MalformedHeader`.
 #[test]
-fn extension_and_parameter_names_are_case_insensitive() {
-    let agreed = client_round_trip(
+fn a_mixed_case_extension_name_is_valid_syntax_and_is_not_this_extension() {
+    let selected = client_round_trip(
         ClientConfig::new(),
         &[b"PerMessage-DEFLATE; Server_No_Context_Takeover"],
     )
-    .expect("HTTP tokens match case-insensitively")
-    .expect("the server selected it");
-    assert!(agreed.peer_no_context_takeover());
+    .expect("mixed case is a conforming token");
+    assert!(selected.is_none(), "an unregistered spelling is not a selection");
+}
+
+#[test]
+fn a_mixed_case_parameter_name_is_unknown_rather_than_malformed() {
+    let error = client_round_trip(
+        ClientConfig::new(),
+        &[b"permessage-deflate; Server_No_Context_Takeover"],
+    )
+    .expect_err("the extension is this one; the parameter is not a registered one");
+    assert_eq!(error, NegotiationError::UnknownParameter);
+}
+
+#[test]
+fn a_mixed_case_parameter_declines_that_alternative_and_keeps_the_next() {
+    let (proposed, _) = server_select(
+        ServerConfig::new(),
+        &[b"permessage-deflate; Server_No_Context_Takeover, \
+            permessage-deflate; server_no_context_takeover"],
+    )
+    .expect("the second alternative spells it as registered");
+    assert_eq!(proposed, "permessage-deflate; server_no_context_takeover");
 }
 
 #[test]
@@ -139,23 +171,18 @@ fn a_trailing_escape_errors() {
 }
 
 #[test]
-fn an_unterminated_quote_hides_no_deflate_offer_from_a_server() {
+fn an_unterminated_quote_fails_the_server_rather_than_declining() {
     // Two inputs because two mutants reach a selection by different routes. If
     // quotes stop delimiting, the hidden comma splits and the second
     // alternative becomes selectable. If quotes still delimit but the imbalance
-    // stops being an error, the first alternative does. One input on its own
-    // declines on the unknown parameter under the other mutant and proves
-    // nothing about the server path.
+    // stops being an error, the first alternative does.
     for offer in [
         br#"permessage-deflate; x="open, permessage-deflate"#.as_slice(),
         br#"permessage-deflate, x-other; note="oops"#.as_slice(),
     ] {
-        let request = headers(&[offer]);
-        assert!(
-            ServerHandshake::accept(ServerConfig::new(), &request).is_none(),
-            "{}",
-            String::from_utf8_lossy(offer)
-        );
+        let error = ServerHandshake::accept(ServerConfig::new(), &headers(&[offer]))
+            .expect_err("the element boundaries are unknowable");
+        assert_eq!(error, NegotiationError::MalformedHeader, "{}", String::from_utf8_lossy(offer));
     }
 }
 
@@ -183,6 +210,97 @@ fn a_flag_parameter_may_not_carry_a_value() {
     )
     .expect_err("the takeover parameters are valueless");
     assert_eq!(error, NegotiationError::ParameterArity);
+}
+
+/// `whole-list-first`. A single pass that validates as it selects passes this
+/// row: it takes the conforming first element and returns before it ever reads
+/// the second. Two passes are what the RFC asks for, and this is the row that
+/// tells them apart -- on one line, and again across two, because RFC 7230
+/// combines separate field lines into one list.
+#[test]
+fn a_malformed_element_after_a_valid_selection_still_fails_the_field() {
+    let one_line =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate, x-other; tag=\xff"])
+            .expect_err("a selectable first element does not excuse the second");
+    assert_eq!(one_line, NegotiationError::MalformedHeader);
+
+    let two_lines =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate", b"x-other; tag=\xff"])
+            .expect_err("separate field lines are still one list");
+    assert_eq!(two_lines, NegotiationError::MalformedHeader);
+}
+
+#[test]
+fn the_server_reads_the_whole_field_before_selecting() {
+    let one_line = ServerHandshake::accept(
+        ServerConfig::new(),
+        &headers(&[b"permessage-deflate, x-other; tag=\xff"]),
+    )
+    .expect_err("a supportable first offer does not excuse the second element");
+    assert_eq!(one_line, NegotiationError::MalformedHeader);
+
+    let two_lines = ServerHandshake::accept(
+        ServerConfig::new(),
+        &headers(&[b"permessage-deflate", b"x-other; tag=\xff"]),
+    )
+    .expect_err("separate field lines are still one list");
+    assert_eq!(two_lines, NegotiationError::MalformedHeader);
+}
+
+/// `extension-list = 1#extension`. The list rule permits empty positions but
+/// not a list made only of them, so this is not the same as an absent header --
+/// which is the distinction the matrix could not make before.
+#[test]
+fn a_present_but_empty_field_is_malformed_not_absent() {
+    for value in [&b""[..], b" ", b" , "] {
+        let client = client_round_trip(ClientConfig::new(), &[value])
+            .expect_err("a present field with no element is a list with no members");
+        assert_eq!(client, NegotiationError::MalformedHeader, "{value:?}");
+
+        let server = ServerHandshake::accept(ServerConfig::new(), &headers(&[value]))
+            .expect_err("a present field with no element is a list with no members");
+        assert_eq!(server, NegotiationError::MalformedHeader, "{value:?}");
+    }
+
+    assert!(client_round_trip(ClientConfig::new(), &[])
+        .expect("an absent header is not a malformed one")
+        .is_none());
+    assert!(ServerHandshake::accept(ServerConfig::new(), &headers(&[]))
+        .expect("an absent header is not a malformed one")
+        .is_none());
+}
+
+#[test]
+fn an_empty_list_position_beside_a_real_element_is_legal() {
+    let agreed = client_round_trip(ClientConfig::new(), &[b", permessage-deflate, "])
+        .expect("RFC 7230 list rules permit empty positions")
+        .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 15);
+}
+
+/// RFC 6455 section 9.1: "the value after quoted-string unescaping MUST conform
+/// to the 'token' ABNF". The quoted spelling buys a different wire encoding,
+/// not a different alphabet -- and the field fails as syntax before anything
+/// tries to read `1 2` as a width.
+#[test]
+fn a_quoted_value_that_unescapes_to_a_non_token_is_malformed() {
+    let error = client_round_trip(
+        ClientConfig::new(),
+        &[br#"permessage-deflate; server_max_window_bits="1 2""#],
+    )
+    .expect_err("a space is not a token character");
+    assert_eq!(error, NegotiationError::MalformedHeader);
+}
+
+/// `extension-param = token [ "=" ... ]`, so an absent parameter name is a
+/// grammar break, not a parameter this crate happens not to know.
+#[test]
+fn an_empty_parameter_name_is_malformed_not_unknown() {
+    for offer in [&b"permessage-deflate;"[..], b"permessage-deflate; =1"] {
+        let error = client_round_trip(ClientConfig::new(), &[offer])
+            .expect_err("there is no name here to be unknown");
+        assert_eq!(error, NegotiationError::MalformedHeader, "{}", String::from_utf8_lossy(offer));
+    }
 }
 
 // --------------------------------------------------------- validate-client-matrix
@@ -501,7 +619,8 @@ fn only_a_sealed_offer_reports_a_value() {
 // --------------------------------------------------------- validate-server-matrix
 
 fn server_select(config: ServerConfig, request: &[&[u8]]) -> Option<(String, Negotiated)> {
-    let handshake = ServerHandshake::accept(config, &headers(request))?;
+    let handshake = ServerHandshake::accept(config, &headers(request))
+        .expect("this helper is for requests whose syntax is conforming")?;
     let proposed = handshake.value().to_str().expect("ASCII").to_owned();
     let response = headers(&[proposed.as_bytes()]);
     let agreed =
@@ -647,6 +766,7 @@ fn the_server_imposes_its_own_takeover_policy() {
 fn a_removed_response_extension_yields_no_agreement() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("the request is conforming")
             .expect("selected");
     assert!(handshake
         .finish(&headers(&[]), PmdComposition::Compatible)
@@ -661,6 +781,7 @@ fn a_rewritten_response_is_rejected_even_when_the_offers_permit_it() {
         ServerConfig::new(),
         &headers(&[b"permessage-deflate; client_max_window_bits"]),
     )
+    .expect("the request is conforming")
     .expect("selected");
     let error = handshake
         .finish(
@@ -675,6 +796,7 @@ fn a_rewritten_response_is_rejected_even_when_the_offers_permit_it() {
 fn a_duplicated_response_extension_is_rejected() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("the request is conforming")
             .expect("selected");
     let error = handshake
         .finish(
@@ -745,6 +867,7 @@ fn a_conflicting_extension_set_produces_no_client_agreement() {
 fn a_conflicting_extension_set_produces_no_server_agreement() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("the request is conforming")
             .expect("selected");
     let error = handshake
         .finish(&headers(&[b"permessage-deflate"]), PmdComposition::Conflict)
@@ -763,6 +886,7 @@ fn composition_is_irrelevant_when_the_server_declined() {
 fn composition_is_irrelevant_when_the_response_dropped_the_selection() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("the request is conforming")
             .expect("selected");
     let agreed = handshake
         .finish(&headers(&[]), PmdComposition::Conflict)
@@ -778,6 +902,7 @@ fn composition_is_irrelevant_when_the_response_dropped_the_selection() {
 fn a_duplicated_response_outranks_a_composition_conflict() {
     let handshake =
         ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+            .expect("the request is conforming")
             .expect("selected");
     let error = handshake
         .finish(&headers(&[b"permessage-deflate", b"permessage-deflate"]), PmdComposition::Conflict)
@@ -794,6 +919,7 @@ fn a_rewritten_response_outranks_a_composition_conflict() {
         ServerConfig::new(),
         &headers(&[b"permessage-deflate; client_max_window_bits"]),
     )
+    .expect("the request is conforming")
     .expect("selected");
     let error = handshake
         .finish(

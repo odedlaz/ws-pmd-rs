@@ -50,18 +50,27 @@ EOF
     cp "$root/validation/shared/scenarios.rs" "$dir/tests/scenarios.rs"
     cp "$root/validation/consumer-matrix/probe.rs" "$dir/tests/probe.rs"
 
+    # `|| true` on both: an empty `grep` exits 1, and under `pipefail` that would
+    # abort the whole run at the assignment -- silently, before this row is named.
     local sys behaviour
     sys=$(cd "$dir" && cargo tree 2>/dev/null \
-        | grep -oE '(libz-rs-sys|libz-sys|zlib-rs) v[0-9.]+' | cut -d' ' -f1 | sort -u | tr '\n' ' ')
+        | grep -oE '(libz-rs-sys|libz-sys|zlib-rs) v[0-9.]+' | cut -d' ' -f1 | sort -u | tr '\n' ' ' || true)
     sys=${sys% }
-    behaviour=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1 | grep -o 'BEHAVIOUR=.*' | cut -d= -f2)
+    behaviour=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1 \
+        | grep -o 'BEHAVIOUR=.*' | cut -d= -f2 || true)
 
-    printf '  %-30s sys=[%-28s] behaviour=%s\n' "$name" "$sys" "${behaviour:-BUILD FAILED}"
+    printf '  %-30s sys=[%-28s] behaviour=%s\n' "$name" "$sys" "${behaviour:-DID NOT RUN}"
     if [ "$sys" != "$want_sys" ]; then
         printf '    FAIL provenance: wanted [%s]\n' "$want_sys" >&2
         failures=$((failures + 1))
     fi
-    if [ "$want_behaviour" != "unasserted" ] && [ "$behaviour" != "$want_behaviour" ]; then
+    if [ -z "$behaviour" ]; then
+        # Checked for every row, including the provenance-only one: `cargo tree`
+        # resolves whether or not the graph compiles, so without this the row that
+        # skips the behaviour comparison would pass a build failure.
+        printf '    FAIL: the probe did not run -- this graph does not build\n' >&2
+        failures=$((failures + 1))
+    elif [ "$want_behaviour" != "unasserted" ] && [ "$behaviour" != "$want_behaviour" ]; then
         printf '    FAIL behaviour: wanted %s\n' "$want_behaviour" >&2
         failures=$((failures + 1))
     fi

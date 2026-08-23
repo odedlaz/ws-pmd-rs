@@ -23,10 +23,12 @@ const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 /// One hard constraint: at least 1. The ceiling detector asks the backend for
 /// one byte past the remaining allowance, so a zero-length buffer makes every
 /// call produce nothing and the stall guard reports a backend that never
-/// moved. Measured, not argued -- at 0 the codec suite fails 22 of 23 rows, at
-/// 1 and at 16 it passes all 23. Everything above 1 trades backend round trips
-/// against stack, and correctness does not depend on where in that range this
-/// sits. 4096 is the value the extraction source used.
+/// moved. Measured, not argued: against the 31-row codec suite at this commit, a
+/// scratch of 0 fails 29 of them, and 1, 16 and 4096 each pass all 31. Counts go
+/// stale as rows are added, so they belong to the rev that measured them.
+/// Everything above 1 trades backend round trips against stack, and correctness
+/// does not depend on where in that range this sits. 4096 is the value the
+/// extraction source used.
 const SCRATCH: usize = 4096;
 
 /// The narrowest inflater `flate2` will construct.
@@ -161,9 +163,11 @@ pub struct Decoder {
     config: InflaterConfig,
     inflater: Decompress,
     reset_between_messages: bool,
-    /// Whether the inflater is part-way through a DEFLATE stream, which is the
-    /// only position where the trailer RFC 7692 strips can be fed back.
-    mid_stream: bool,
+    /// Whether a DEFLATE stream is open -- bytes consumed into one that has not
+    /// ended. RFC 7692 section 7.2.1 step 3 strips the four octets from the tail
+    /// of a block already begun, so this is the only position where they can be
+    /// fed back, and a message that ends anywhere else is missing that block.
+    stream_open: bool,
     delivered: usize,
     poisoned: bool,
 }
@@ -218,7 +222,7 @@ impl Negotiated {
             config,
             inflater: config.build(),
             reset_between_messages: self.peer_no_context_takeover(),
-            mid_stream: false,
+            stream_open: false,
             delivered: 0,
             poisoned: false,
         }
@@ -258,12 +262,12 @@ impl Decoder {
     /// Start the inflater over on a fresh DEFLATE stream.
     ///
     /// The position moves with it, and the two cannot be separated: the stripped
-    /// trailer only completes a stream that is part-way through, so forgetting
-    /// the position here is what feeds `00 00 ff ff` to an inflater sitting at
-    /// the start of one.
+    /// octets only complete a block already begun, so forgetting the position
+    /// here is what feeds `00 00 ff ff` to an inflater sitting at the start of a
+    /// stream, where it parses as a stored block with a length nobody sent.
     fn reinitialise(&mut self) {
         self.config.reinitialise(&mut self.inflater);
-        self.mid_stream = false;
+        self.stream_open = false;
     }
 
     fn decode(
@@ -275,20 +279,24 @@ impl Decoder {
     ) -> Result<(), CodecError> {
         self.inflate(input, limit, output)?;
         if final_fragment {
-            // Only a message flushed with `Z_SYNC_FLUSH` had a trailer
-            // stripped from it, and only an inflater part-way through a stream
-            // can take one back. A peer that ended its stream with `BFINAL` has
-            // already delivered everything; a message that carried no bytes
-            // never started a stream. Either way the inflater sits byte-aligned
-            // at the start of one, where the four bytes have no preceding
-            // partial byte to carry their three header bits and parse as a
-            // stored block with a length nobody sent -- a state that then
-            // decides what the *next* message decodes to. So the question is
-            // where the inflater stands, not what this call saw: a stream that
-            // ended on an earlier fragment ended it just as much.
-            if self.mid_stream {
-                self.inflate(TRAILER, limit, output)?;
+            // RFC 7692 section 7.2.1 removes `00 00 ff ff` from the tail of
+            // every compressed message, so the decoder owes one back to every
+            // message -- a `BFINAL` one included, because step 2 appends an
+            // empty `BTYPE=00` block first and step 3 takes that block's tail.
+            // Section 7.2.3.4 calls the octet left behind "necessary" for
+            // exactly this reason.
+            //
+            // So the four octets always complete a block already begun. An
+            // inflater sitting at the start of a stream means the mandatory
+            // block never arrived, and feeding it there would parse as a stored
+            // block with a length nobody sent -- which then decides what the
+            // *next* message decodes to. That input is malformed, and saying so
+            // is the only answer that neither corrupts state nor truncates a
+            // conforming message.
+            if !self.stream_open {
+                return Err(CodecError::InvalidStream);
             }
+            self.inflate(TRAILER, limit, output)?;
             if self.reset_between_messages {
                 self.reinitialise();
             }
@@ -329,27 +337,23 @@ impl Decoder {
                 return Err(CodecError::MessageTooLong { size, limit: limit.0 });
             }
             if step.stream_ended {
-                // The peer flushed with BFINAL set, which ends the DEFLATE
-                // stream (RFC 7692 section 7.2.3.4 permits this). A peer that
-                // does it must start a new stream, which cannot reference the
-                // old window, so resetting mirrors it. Without this the inflater
-                // stays finished and every later message decodes to nothing.
+                // A `BFINAL` block ends the DEFLATE stream, which RFC 7692
+                // section 7.2.3.4 permits, and section 7.2.1 pads it to a byte
+                // boundary and says "the next DEFLATE block follows the padded
+                // data if any" -- inside the same message. So this is a block
+                // boundary, not the end of the message: reinitialise, because
+                // the next stream cannot reference the window this one closed,
+                // and keep reading. Stopping here truncates a conforming
+                // message; leaving the inflater finished makes every later
+                // message decode to nothing.
                 self.reinitialise();
-                // And stop here. The stream is over, so anything still unread
-                // is this message's padding, and feeding it to the fresh
-                // inflater would corrupt the stream the same way the trailer
-                // does at that position.
-                return Ok(());
+            } else if step.remaining.is_some_and(|rest| rest.len() < input.len()) {
+                // Consuming a byte is what opens a stream, and only a step that
+                // did not just close one can open the next.
+                self.stream_open = true;
             }
             match step.remaining {
-                Some(rest) => {
-                    // Consuming a byte is what puts the inflater inside a stream,
-                    // which is the one position where a stripped trailer belongs.
-                    if rest.len() < input.len() {
-                        self.mid_stream = true;
-                    }
-                    input = rest;
-                }
+                Some(rest) => input = rest,
                 None => return Ok(()),
             }
         }
@@ -544,11 +548,15 @@ mod tests {
     /// one role the two fields would only have to agree.
     ///
     /// This is a mapping and state seam, not a claim about the arguments
-    /// `flate2` receives. A literal substituted inside `build` still passes it,
-    /// and nothing downstream can see the difference: `Decompress` exposes no
-    /// width read-back, and on the pinned backend the width changes neither
-    /// decoding nor allocation. Those substitutions are unguarded and recorded
-    /// as such rather than described as covered.
+    /// `flate2` receives. A literal substituted inside `build` still passes this
+    /// row, and nothing reachable from the pinned backend can see the
+    /// difference: `Decompress` exposes no width read-back, and there the width
+    /// changes neither decoding nor allocation. What guards those substitutions
+    /// is the executed C validation arm: a hardcoded 9 dies on its width-15
+    /// admit control, a hardcoded 15 on its three rejection rows, and each of
+    /// those requires `InvalidStream`, so an unrelated failure cannot stand in
+    /// for window enforcement. Unguarded in this suite and on this backend,
+    /// guarded there.
     #[test]
     fn the_inflater_is_built_at_the_negotiated_peer_width_for_both_roles() {
         for peer in 8..=15u8 {

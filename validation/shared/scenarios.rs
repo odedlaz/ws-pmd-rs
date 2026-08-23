@@ -10,7 +10,7 @@
 use flate2::{Compress, Compression, FlushCompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
-    ClientConfig, ClientOffer, Decoder, DecompressedLimit, PmdComposition,
+    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, PmdComposition,
 };
 
 const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
@@ -22,7 +22,9 @@ enum Outcome {
     /// Decoded, and byte-exact against the plaintext the peer compressed.
     Exact,
     Wrong(String),
-    Rejected,
+    /// Carrying the cause, because `Stalled`, `Poisoned` and a limit overrun are
+    /// all rejections too, and none of them is window enforcement.
+    Rejected(CodecError),
 }
 
 /// Octo's generator, unchanged, so both arms see identical bytes.
@@ -43,9 +45,15 @@ fn rnd(n: usize, seed: u32) -> Vec<u8> {
 /// repeat is a match only if the window reaches back `gap`, and 4 KiB of match is
 /// unmistakable in the wire size rather than a difference anyone must interpret.
 fn far_reference_payload(gap: usize) -> Vec<u8> {
+    assert!(
+        gap >= 4096,
+        "gap {gap} is under the marker length, so the distance would be 4096 whatever was asked \
+         for -- the precondition is enforced here rather than documented, because a silent \
+         clamp is what made a boundary row prove a different boundary"
+    );
     let repeated = rnd(4096, 0xABCD);
     let mut plain = repeated.clone();
-    plain.extend_from_slice(&rnd(gap.saturating_sub(4096), 0x1234));
+    plain.extend_from_slice(&rnd(gap - 4096, 0x1234));
     plain.extend_from_slice(&repeated);
     plain
 }
@@ -84,14 +92,22 @@ fn peer_message(plain: &[u8], window_bits: u8) -> Vec<u8> {
     wire
 }
 
-/// A stream that ends with `BFINAL`, which is what drives the decoder's recovery
-/// reinitialisation. RFC 7692 section 7.2.3.4 permits a peer to do this.
+/// One conforming message from a peer that flushed with `BFINAL` set, which is
+/// what drives the decoder's recovery reinitialisation.
+///
+/// RFC 7692 section 7.2.3.4 permits the flush; section 7.2.1 still applies to the
+/// message. Step 2 appends an empty `BTYPE=00` block after the padded `BFINAL`
+/// block and step 3 removes its four octets, leaving the single `0x00` that
+/// section 7.2.3.4 calls necessary. A bare `Finish` stream without it is
+/// malformed input, not a `BFINAL` message, and the crate rejects it -- which
+/// would satisfy every rejection row below for the wrong reason.
 fn bfinal_message(plain: &[u8], window_bits: u8) -> Vec<u8> {
     let mut peer = Compress::new_with_window_bits(Compression::best(), false, window_bits);
     let mut wire = vec![0u8; plain.len() * 2 + 1024];
     let status = peer.compress(plain, &mut wire, FlushCompress::Finish).expect("one buffer");
     assert_eq!(status, Status::StreamEnd, "the whole stream must finish in one buffer");
     wire.truncate(usize::try_from(peer.total_out()).expect("fits"));
+    wire.push(0x00);
     wire
 }
 
@@ -118,7 +134,7 @@ fn feed(decoder: &mut Decoder, wire: &[u8], expected: &[u8]) -> Outcome {
     match decoder.decompress(wire, true, ROOMY) {
         Ok(bytes) if bytes == expected => Outcome::Exact,
         Ok(bytes) => Outcome::Wrong(format!("{} bytes, not the {} sent", bytes.len(), expected.len())),
-        Err(_) => Outcome::Rejected,
+        Err(error) => Outcome::Rejected(error),
     }
 }
 

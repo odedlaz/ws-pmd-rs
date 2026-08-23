@@ -104,14 +104,15 @@ impl Peer {
             }
         }
         assert!(output.ends_with(TRAILER), "the peer must emit a sync-flush trailer");
+        assert!(input.is_empty(), "the whole payload must reach the wire");
         output
     }
 }
 
-/// One message from a peer that ended its DEFLATE stream with `BFINAL` rather
-/// than flushing. Nothing is stripped from one of these: RFC 7692 strips the
-/// `Z_SYNC_FLUSH` trailer, and a stream ended this way has none.
-fn bfinal_wire(plain: &[u8]) -> Vec<u8> {
+/// A bare finished RFC 1951 stream: steps 2 and 3 of RFC 7692 section 7.2.1 have
+/// not been run on it, so it is *not* a conforming compressed message. Only the
+/// rejection row may use this directly.
+fn bare_finished_stream(plain: &[u8]) -> Vec<u8> {
     let mut ender = Compress::new_with_window_bits(Compression::best(), false, 15);
     let mut wire = vec![0u8; plain.len() * 2 + 64];
     assert_eq!(
@@ -120,6 +121,21 @@ fn bfinal_wire(plain: &[u8]) -> Vec<u8> {
         "the whole stream must finish"
     );
     wire.truncate(usize::try_from(ender.total_out()).expect("fits"));
+    wire
+}
+
+/// One conforming message from a peer that flushed with `BFINAL` set.
+///
+/// RFC 7692 section 7.2.1 runs on every compressed message: the `BFINAL` block is
+/// padded to a byte boundary, step 2 appends an empty `BTYPE=00` block because the
+/// data does not already end with one, and step 3 removes that block's four
+/// octets. What is left is the single `0x00` octet section 7.2.3.4 calls
+/// "necessary to allow the payload to be decompressed in the same manner as
+/// messages flushed using DEFLATE blocks with BFINAL unset" -- the same shape as
+/// the RFC's own `f3 48 cd c9 c9 07 00 00` vector.
+fn bfinal_message(plain: &[u8]) -> Vec<u8> {
+    let mut wire = bare_finished_stream(plain);
+    wire.push(0x00);
     wire
 }
 
@@ -193,24 +209,19 @@ fn a_message_after_a_bfinal_message_still_decodes() {
     assert_eq!(second, payload, "the inflater must have restarted after BFINAL");
 }
 
-/// The BFINAL row above passes on a coincidence, so this is the one that pins the
-/// behaviour.
-///
-/// `00 00 ff ff` is an empty stored block only when its three header bits ride in
-/// the tail of a preceding partial byte. `BFINAL_HELLO` leaves exactly one spare
-/// byte after its stream ends, which supplies them -- so feeding the trailer to
-/// the rebuilt inflater happened to work there. A peer whose stream ends on a
-/// byte boundary leaves none, and the same trailer then parses as a stored block
-/// with a length nobody sent: the next message decoded to 1,033 bytes for a 1,024
-/// byte payload, silently, with no error and no poisoning.
+/// The row above uses the RFC's own five-octet payload, short enough to survive a
+/// corrupted inflater either way. This one drives a longer producer and checks the
+/// state a `BFINAL` message leaves behind, with the next message in the form that
+/// tells corruption from rejection.
 #[test]
 fn a_message_after_a_byte_aligned_bfinal_message_decodes_exactly() {
     let mut decoder = plain_decoder();
     let first = b"a peer that ends its stream on a byte boundary".to_vec();
-    assert_eq!(decoder.decompress(&bfinal_wire(&first), true, ROOMY).expect("first"), first);
+    assert_eq!(decoder.decompress(&bfinal_message(&first), true, ROOMY).expect("first"), first);
 
-    let payload = structured_payload(4096);
-    let second = Peer::new(15).send(&payload);
+    let payload = structured_payload(1024);
+    let second = Peer::uncompressed().send(&payload);
+    assert_eq!(second.first(), Some(&0x00), "the input that tells corruption from rejection");
     assert_eq!(
         decoder.decompress(&second, true, ROOMY).expect("second"),
         payload,
@@ -218,19 +229,78 @@ fn a_message_after_a_byte_aligned_bfinal_message_decodes_exactly() {
     );
 }
 
-/// The same corruption, one fragment later. A peer may end its stream before the
-/// last fragment of a message, and RFC 6455 lets the message end with a
-/// zero-length continuation frame, so the fragment that carries `final_fragment`
-/// need not carry any bytes.
+/// RFC 7692 section 7.2.1: "An endpoint MAY use both DEFLATE blocks with the
+/// BFINAL bit set to 0 and DEFLATE blocks with the BFINAL bit set to 1", and
+/// "The next DEFLATE block follows the padded data if any" -- in the same
+/// message. So a stream ending is a block boundary, not a message boundary, and
+/// a decoder that stops there drops the rest of a conforming message in silence.
 ///
-/// The stream ended in an earlier call, so the inflater was rebuilt there and
-/// sits at the start of a fresh stream by the time the trailer would be fed --
-/// the state `91a927e` closed for a single-fragment message, reached across two.
+/// The second stream is compressed by a fresh peer, because a peer that closed
+/// its stream cannot reference the window it closed.
+#[test]
+fn rfc_7692_7_2_1_a_second_stream_follows_a_bfinal_block_in_one_message() {
+    let mut wire = bare_finished_stream(b"Hello");
+    wire.extend(Peer::new(15).send(b"World"));
+    let decoded = plain_decoder().decompress(&wire, true, ROOMY).expect("a legal message");
+    assert_eq!(decoded, b"HelloWorld", "everything after the BFINAL block belongs to it");
+}
+
+/// The same message, split at the stream boundary. Section 7.2.1 says the removal
+/// of `00 00 ff ff` "MUST NOT be done" for non-final fragments, so the first
+/// fragment is the padded `BFINAL` block exactly as it stands.
+#[test]
+fn rfc_7692_7_2_1_a_second_stream_follows_a_bfinal_block_across_a_fragment() {
+    let mut decoder = plain_decoder();
+    let mut got = decoder
+        .decompress(&bare_finished_stream(b"Hello"), false, ROOMY)
+        .expect("the fragment that ends the stream");
+    got.extend(decoder.decompress(&Peer::new(15).send(b"World"), true, ROOMY).expect("the rest"));
+    assert_eq!(got, b"HelloWorld", "a stream boundary is not a fragment boundary either");
+}
+
+/// Steps 2 and 3 of section 7.2.1 are mandatory, so a bare finished RFC 1951
+/// stream is malformed input however well it decompresses. Saying so is the only
+/// answer that neither corrupts state nor truncates a conforming message: before
+/// this, the four octets went into an inflater at the start of a stream and the
+/// peer's own framing was delivered as the *next* message's content -- 1,033
+/// bytes for a 1,024-byte payload, `Ok`, no error and no poisoning.
+///
+/// Both lengths, because a short stream ends on the loop's first pass, where the
+/// position was never opened and clearing it at the stream end proves nothing. A
+/// stream long enough to refill the scratch buffer opens it first, and that is
+/// the one that needs the stream end to take it back.
+#[test]
+fn a_bare_finished_stream_is_rejected() {
+    for plain in [b"no appended empty block".to_vec(), structured_payload(100_000)] {
+        let mut decoder = plain_decoder();
+        assert_eq!(
+            decoder.decompress(&bare_finished_stream(&plain), true, ROOMY),
+            Err(CodecError::InvalidStream),
+            "{} bytes: the mandatory post-BFINAL block never arrived",
+            plain.len()
+        );
+        assert_eq!(
+            decoder.decompress(&Peer::new(15).send(b"anything"), true, ROOMY),
+            Err(CodecError::Poisoned),
+            "and every failure here is terminal"
+        );
+    }
+}
+
+/// A conforming `BFINAL` message whose mandatory tail lands in one fragment and
+/// whose message ends in the next. RFC 6455 section 5.4 permits that: "A sender
+/// MAY create fragments of any size for non-control frames", an empty final
+/// continuation frame included.
+///
+/// The stream ends in the earlier call, so whatever the decoder records about
+/// where the inflater stands has to survive the fragment boundary -- and the
+/// mandatory `0x00` that arrives before it is what licenses the trailer.
 #[test]
 fn a_stream_that_ends_before_the_final_fragment_leaves_the_next_message_exact() {
     let mut decoder = plain_decoder();
     let first = b"a peer that ends its stream on a byte boundary".to_vec();
-    let mut got = decoder.decompress(&bfinal_wire(&first), false, ROOMY).expect("first fragment");
+    let mut got =
+        decoder.decompress(&bfinal_message(&first), false, ROOMY).expect("first fragment");
     got.extend(decoder.decompress(&[], true, ROOMY).expect("an empty final fragment"));
     assert_eq!(got, first, "the message whose stream ended early still arrives whole");
 
@@ -240,20 +310,19 @@ fn a_stream_that_ends_before_the_final_fragment_leaves_the_next_message_exact() 
     assert_eq!(
         decoder.decompress(&second, true, ROOMY).expect("second"),
         payload,
-        "a stream that ended on an earlier fragment must not take the trailer"
+        "a stream that ended on an earlier fragment must leave the position with it"
     );
 }
 
-/// A `BFINAL` stream long enough to span several backend calls, so the position
-/// is already set by an earlier call in the same fragment and the stream end has
-/// to clear it. Every other `BFINAL` row here finishes in one call, where the
-/// position was never set and clearing it proves nothing -- and a real
-/// `BFINAL` message is usually the long kind.
+/// A `BFINAL` message long enough to span several backend calls, so the stream
+/// ends part-way through the loop rather than on its first pass. Every other
+/// `BFINAL` row here finishes in one call -- and a real one is usually the long
+/// kind.
 #[test]
 fn a_long_bfinal_message_leaves_the_next_message_exact() {
     let mut decoder = plain_decoder();
     let first = structured_payload(100_000);
-    assert_eq!(decoder.decompress(&bfinal_wire(&first), true, ROOMY).expect("first"), first);
+    assert_eq!(decoder.decompress(&bfinal_message(&first), true, ROOMY).expect("first"), first);
 
     let payload = structured_payload(1024);
     let second = Peer::uncompressed().send(&payload);
@@ -265,25 +334,34 @@ fn a_long_bfinal_message_leaves_the_next_message_exact() {
     );
 }
 
-/// A message that carries no bytes at all never started a stream, so there is
-/// nothing for the trailer to complete and it lands at a stream boundary again.
-///
-/// RFC 7692 section 7.2.3.6 has a peer send `0x00` for an empty message, so no
-/// conforming peer produces this; whether an empty payload should be rejected
-/// outright is a separate question. Either way the state it leaves behind must
-/// not decide what a later message decodes to.
+/// A message that carries no bytes at all began no block, so the four octets step
+/// 3 removed cannot belong to it. RFC 7692 section 7.2.3.6 has an endpoint send
+/// the payload `0x00` for an empty fragment -- one octet, not none -- so this is
+/// the same missing-tail condition as a bare finished stream, and it takes the
+/// same answer.
 #[test]
-fn an_empty_final_fragment_leaves_the_next_message_exact() {
-    let mut decoder = plain_decoder();
-    assert!(decoder.decompress(&[], true, ROOMY).expect("an empty message").is_empty());
-
-    let payload = structured_payload(1024);
-    let wire = Peer::uncompressed().send(&payload);
-    assert_eq!(wire.first(), Some(&0x00), "the input that tells corruption from rejection");
+fn an_empty_message_is_rejected() {
     assert_eq!(
-        decoder.decompress(&wire, true, ROOMY).expect("the next message"),
-        payload,
-        "a message that started no stream must not take the trailer"
+        plain_decoder().decompress(&[], true, ROOMY),
+        Err(CodecError::InvalidStream),
+        "no block begun, so nothing for the stripped octets to complete"
+    );
+}
+
+/// And after a `no_context_takeover` reinitialisation, which is the other place
+/// the inflater goes back to the start of a stream. A decoder that reinitialised
+/// there without putting the position back would take the next message's stripped
+/// octets into a fresh inflater, and this is the only shape that observes it --
+/// any message carrying bytes opens the stream again before the trailer is fed.
+#[test]
+fn an_empty_message_is_rejected_after_a_no_takeover_reinitialisation() {
+    let mut decoder = decoder_for(b"permessage-deflate; server_no_context_takeover");
+    let first = b"a conforming message, so the reinitialisation runs".to_vec();
+    assert_eq!(decoder.decompress(&Peer::new(15).send(&first), true, ROOMY).expect("first"), first);
+    assert_eq!(
+        decoder.decompress(&[], true, ROOMY),
+        Err(CodecError::InvalidStream),
+        "the reinitialisation put the inflater back at a stream start"
     );
 }
 

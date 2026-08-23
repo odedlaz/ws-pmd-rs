@@ -1,0 +1,12 @@
+# `Decompress::reset` takes no window bits. Both backends reinitialise at their
+# own default of 15 -- the C one spells it out as
+# `inflateReset2(stream, ±MZ_DEFAULT_WINDOW_BITS)` -- so calling it silently
+# discards the negotiated window, and nothing observable changes: the declared
+# width does not affect decoding, only allocation. Rebuild through
+# `InflaterConfig::build` instead, which is the only inflater factory here.
+#
+# This lint exists because no test can catch the regression. Reverting to
+# `reset` survives the whole suite and every mutant probe.
+disallowed-methods = [
+    { path = "flate2::Decompress::reset", reason = "discards the negotiated window; use InflaterConfig::build" },
+]

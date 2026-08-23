@@ -60,6 +60,42 @@ impl DecompressedLimit {
     }
 }
 
+/// Everything the inflater is built from, kept so that rebuilding it is the
+/// same operation as building it.
+///
+/// `flate2` offers no way to reset an inflater to the width it was constructed
+/// with. `Decompress::reset` takes only `zlib_header`, and the C backend spells
+/// out what that costs -- `inflateReset2(stream, ±MZ_DEFAULT_WINDOW_BITS)`,
+/// which is 15 whatever the stream was made with (`flate2-1.1.9/src/ffi/c.rs`).
+/// zlib-rs rebuilds from its own default the same way. So a negotiated narrow
+/// window survived exactly until the first reset, and this crate exists to
+/// bound per-connection memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InflaterConfig {
+    zlib_header: bool,
+    window_bits: u8,
+}
+
+impl InflaterConfig {
+    /// RFC 7692 messages are raw DEFLATE, and a peer window of 8 is legal on
+    /// the wire but below the floor `flate2` will construct.
+    const fn for_peer_window(peer_max_window_bits: u8) -> Self {
+        Self {
+            zlib_header: false,
+            window_bits: if peer_max_window_bits < MIN_INFLATER_WINDOW_BITS {
+                MIN_INFLATER_WINDOW_BITS
+            } else {
+                peer_max_window_bits
+            },
+        }
+    }
+
+    /// The only place this crate constructs an inflater.
+    fn build(self) -> Decompress {
+        Decompress::new_with_window_bits(self.zlib_header, self.window_bits)
+    }
+}
+
 /// The inflater for one connection, in one direction.
 ///
 /// Holds the peer's decompression history and the running total for the message
@@ -72,6 +108,7 @@ impl DecompressedLimit {
 /// cannot honour, since the peer's compressor has moved on either way.
 #[derive(Debug)]
 pub struct Decoder {
+    config: InflaterConfig,
     inflater: Decompress,
     reset_between_messages: bool,
     delivered: usize,
@@ -123,15 +160,10 @@ impl Negotiated {
     /// ```
     #[must_use]
     pub fn into_decoder(self) -> Decoder {
+        let config = InflaterConfig::for_peer_window(self.peer_max_window_bits());
         Decoder {
-            // A negotiated peer window of 8 is legal and is reported as 8, but
-            // flate2 will not build an inflater below 9. Widening is safe in
-            // this direction only: a wider window accepts every stream a
-            // narrower compressor can emit. The agreement is never rewritten.
-            inflater: Decompress::new_with_window_bits(
-                false,
-                self.peer_max_window_bits().max(MIN_INFLATER_WINDOW_BITS),
-            ),
+            config,
+            inflater: config.build(),
             reset_between_messages: self.peer_no_context_takeover(),
             delivered: 0,
             poisoned: false,
@@ -180,7 +212,7 @@ impl Decoder {
         if final_fragment {
             self.inflate(TRAILER, limit, output)?;
             if self.reset_between_messages {
-                self.inflater.reset(false);
+                self.inflater = self.config.build();
             }
         }
         Ok(())
@@ -237,7 +269,7 @@ impl Decoder {
                 // does it must start a new stream, which cannot reference the
                 // old window, so resetting mirrors it. Without this the inflater
                 // stays finished and every later message decodes to nothing.
-                self.inflater.reset(false);
+                self.inflater = self.config.build();
             }
             if !progress(consumed, produced, !input.is_empty())? {
                 return Ok(());
@@ -278,19 +310,22 @@ const fn progress(
 #[cfg(test)]
 #[expect(clippy::panic, reason = "a panic is how a test reports")]
 mod tests {
-    use super::{advance, progress, CodecError};
+    use super::{advance, progress, CodecError, InflaterConfig};
+    use crate::negotiated::{Negotiated, Role};
 
-    /// Exhaustive: three progress shapes against both residual states is the
-    /// whole input space of the function, now that the status is not part of it.
+    /// Exhaustive over the four `(consumed == 0, produced == 0)` classes
+    /// against both residual states. Three progress shapes is not the whole
+    /// space -- both-nonzero is its own class, and `|| -> ^` in the guard is a
+    /// natural mutation that only it can see from here.
     ///
-    /// It has to be pinned here because no driven row reaches the two cases that
-    /// matter. Across the suite, every zero-progress point is `BufError` with
-    /// the input drained -- the one combination both the old rule and this one
-    /// answer the same way. So the two mutants worth fearing are invisible to
-    /// the integration tests in opposite ways: deleting the guard makes the
-    /// codec spin, and `cargo test` has no per-test timeout, so the row that
-    /// should go red never finishes; forcing `input_remains` to false makes it
-    /// exit early and drop a tail in silence, with every row still green.
+    /// The division of labour with the driven suite is real and goes both ways.
+    /// **The table owns zero progress with input remaining**, because no row
+    /// reaches it: every zero-progress point in the suite is drained, so a
+    /// deleted guard makes the codec spin -- and `cargo test` has no per-test
+    /// timeout, so the row that should go red never returns -- while forcing
+    /// the residual false drops a tail with every row still green. **The suite
+    /// owns both-nonzero**, which four codec rows catch and which this table
+    /// only spot-checks. Neither instrument covers the space alone.
     #[test]
     fn a_stall_is_zero_progress_with_input_still_to_read() {
         for (consumed, produced, input_remains, expected) in [
@@ -300,6 +335,8 @@ mod tests {
             (1, 0, true, Some(true)),
             (0, 1, false, Some(true)),
             (0, 1, true, Some(true)),
+            (1, 1, false, Some(true)),
+            (1, 1, true, Some(true)),
         ] {
             let got = progress(consumed, produced, input_remains);
             match (got, expected) {
@@ -311,6 +348,35 @@ mod tests {
                     "progress({consumed}, {produced}, {input_remains}) gave {got:?}, wanted {want:?}"
                 ),
             }
+        }
+    }
+
+    /// The arguments the production factory hands `flate2`, for every peer
+    /// width both roles can negotiate.
+    ///
+    /// Read off the `Decoder` a real agreement built, not off a helper called
+    /// beside it, so a correct mapping next to a hardcoded call site cannot
+    /// pass. Both roles, because `peer_max_window_bits` reads the opposite
+    /// stored field in each and a direction swap is otherwise invisible: with
+    /// one role the two fields would only have to agree.
+    ///
+    /// The width itself has no effect on decoding -- measured, on both backends
+    /// -- so nothing here can be a decode test. What it governs is allocation,
+    /// which is the job RFC 7692 section 7.1.2.2 gives the parameter.
+    #[test]
+    fn the_inflater_is_built_at_the_negotiated_peer_width_for_both_roles() {
+        for peer in 8..=15u8 {
+            let expected = InflaterConfig {
+                zlib_header: false,
+                window_bits: if peer == 8 { 9 } else { peer },
+            };
+            // Role::Client reads server_max_window_bits as the peer's; the
+            // local field is set to a different value so a swap shows up.
+            let client = Negotiated::new(Role::Client, false, false, peer, 15 - (peer - 8));
+            assert_eq!(client.into_decoder().config, expected, "client, peer {peer}");
+
+            let server = Negotiated::new(Role::Server, false, false, 15 - (peer - 8), peer);
+            assert_eq!(server.into_decoder().config, expected, "server, peer {peer}");
         }
     }
 

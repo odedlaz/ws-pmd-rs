@@ -62,6 +62,10 @@ missing_const_for_fn = "allow"
 # test pinning it, so the allowance goes red if the invariant stops holding.
 # Test modules opt out at the file or module level, where a panic is the
 # reporting mechanism rather than a failure mode.
+# `Decompress::reset` discards the negotiated window and no test can see it;
+# see clippy.toml for the reason and the measurement.
+disallowed_methods = "deny"
+
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"

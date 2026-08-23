@@ -136,6 +136,11 @@ impl ClientHandshake {
         headers: &HeaderMap,
         composition: PmdComposition,
     ) -> Result<Option<Negotiated>, NegotiationError> {
+        // Response-only, and so not in `grammar::validate`, which the server
+        // runs on a request where RFC 6455 section 11.3.2 permits repetition.
+        if headers.get_all(SEC_WEBSOCKET_EXTENSIONS).iter().nth(1).is_some() {
+            return Err(NegotiationError::RepeatedResponseHeader);
+        }
         grammar::validate(headers)?;
         let Some(params) = sole_deflate(headers)? else {
             return Ok(None);

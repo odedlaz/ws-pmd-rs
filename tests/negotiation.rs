@@ -215,19 +215,16 @@ fn a_flag_parameter_may_not_carry_a_value() {
 /// `whole-list-first`. A single pass that validates as it selects passes this
 /// row: it takes the conforming first element and returns before it ever reads
 /// the second. Two passes are what the RFC asks for, and this is the row that
-/// tells them apart -- on one line, and again across two, because RFC 7230
-/// combines separate field lines into one list.
+/// tells them apart.
+///
+/// One line only. A response may not repeat the field at all, so the
+/// across-two-lines half of this property is now the server row below, where
+/// repetition stays legal.
 #[test]
 fn a_malformed_element_after_a_valid_selection_still_fails_the_field() {
-    let one_line =
-        client_round_trip(ClientConfig::new(), &[b"permessage-deflate, x-other; tag=\xff"])
-            .expect_err("a selectable first element does not excuse the second");
-    assert_eq!(one_line, NegotiationError::MalformedHeader);
-
-    let two_lines =
-        client_round_trip(ClientConfig::new(), &[b"permessage-deflate", b"x-other; tag=\xff"])
-            .expect_err("separate field lines are still one list");
-    assert_eq!(two_lines, NegotiationError::MalformedHeader);
+    let error = client_round_trip(ClientConfig::new(), &[b"permessage-deflate, x-other; tag=\xff"])
+        .expect_err("a selectable first element does not excuse the second");
+    assert_eq!(error, NegotiationError::MalformedHeader);
 }
 
 #[test]
@@ -490,17 +487,30 @@ fn two_selections_are_rejected_across_one_line_and_across_two() {
             .expect_err("one selection only");
     assert_eq!(one_line, NegotiationError::DuplicateExtension);
 
+    // Across two lines the field count decides first, so `DuplicateExtension`
+    // is reachable in a response only within a single field line.
     let two_lines =
         client_round_trip(ClientConfig::new(), &[b"permessage-deflate", b"permessage-deflate"])
-            .expect_err("separate field lines are still one list");
-    assert_eq!(two_lines, NegotiationError::DuplicateExtension);
+            .expect_err("a response carries one field line");
+    assert_eq!(two_lines, NegotiationError::RepeatedResponseHeader);
 }
 
+/// RFC 6455 section 11.3.2, and the response fails before a selection is sought.
 #[test]
-fn a_selection_is_found_on_a_later_header_line() {
-    let agreed = client_round_trip(ClientConfig::new(), &[b"x-other", b"permessage-deflate"])
-        .expect("legal")
-        .expect("the server selected it");
+fn a_selection_on_a_second_response_field_line_is_rejected() {
+    let error = client_round_trip(ClientConfig::new(), &[b"x-other", b"permessage-deflate"])
+        .expect_err("a response must carry one Sec-WebSocket-Extensions field");
+    assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+}
+
+/// The property the row above used to carry, kept on the side that still allows
+/// it: a request may repeat the field, so an offer on a later line is found.
+#[test]
+fn an_offer_on_a_later_request_field_line_is_still_selected() {
+    let (response, agreed) =
+        server_select(ServerConfig::new(), &[b"x-other", b"permessage-deflate"])
+            .expect("a repeated request field is legal and the offer is on the second line");
+    assert!(response.starts_with("permessage-deflate"));
     assert_eq!(agreed.peer_max_window_bits(), 15);
 }
 
@@ -943,4 +953,53 @@ fn a_rewritten_response_outranks_a_composition_conflict() {
         )
         .expect_err("both faults are present");
     assert_eq!(error, NegotiationError::ResponseAltered);
+}
+
+/// RFC 6455 section 11.3.2, every shape the count has to separate. The repeated
+/// rows all minted a `Negotiated` before this rule existed except the last,
+/// which declined silently -- an uncompressed connection and no error at all.
+#[test]
+fn the_response_field_line_count_decides_before_any_selection() {
+    let mints: &[&[&[u8]]] = &[&[b"permessage-deflate"], &[b"x-other, permessage-deflate"]];
+    for response in mints {
+        client_round_trip(ClientConfig::new(), response)
+            .expect("one field line is legal however many elements it carries")
+            .expect("the server selected permessage-deflate");
+    }
+
+    let repeated: &[&[&[u8]]] = &[
+        &[b"x-other", b"permessage-deflate"],
+        &[b"permessage-deflate", b"x-other"],
+        &[b"permessage-deflate", b"permessage-deflate"],
+        &[b"x-a", b"permessage-deflate", b"x-b"],
+        &[b"x-a", b"x-b"],
+    ];
+    for response in repeated {
+        let error = client_round_trip(ClientConfig::new(), response)
+            .expect_err("a repeated response field fails whatever the lines carry");
+        assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+    }
+}
+
+/// Cardinality outranks grammar: move the check below `grammar::validate` and
+/// the two repeated rows report `MalformedHeader` instead.
+///
+/// The single-line row is the control and the load-bearing one -- a check that
+/// counted elements rather than field lines, or that ran unconditionally, would
+/// swallow ordinary grammar faults while every other row here still passed.
+#[test]
+fn a_repeated_response_field_outranks_a_grammar_fault_on_it() {
+    let one_line = client_round_trip(ClientConfig::new(), &[b"permessage-deflate; ="])
+        .expect_err("a malformed parameter on one line is a grammar fault");
+    assert_eq!(one_line, NegotiationError::MalformedHeader);
+
+    let both_orders: &[&[&[u8]]] = &[
+        &[b"permessage-deflate; =", b"permessage-deflate"],
+        &[b"permessage-deflate", b"permessage-deflate; ="],
+    ];
+    for response in both_orders {
+        let error = client_round_trip(ClientConfig::new(), response)
+            .expect_err("the field is both repeated and malformed");
+        assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+    }
 }

@@ -32,10 +32,24 @@ pub enum NegotiationError {
     #[error("permessage-deflate parameter has the wrong arity")]
     ParameterArity,
 
-    /// `permessage-deflate` appeared more than once where one selection is
-    /// required.
+    /// `permessage-deflate` appeared more than once inside a single response
+    /// field line. Repetition *across* field lines is
+    /// [`RepeatedResponseHeader`](Self::RepeatedResponseHeader), which is checked
+    /// first, so a response can only reach this variant on one line.
     #[error("permessage-deflate selected more than once")]
     DuplicateExtension,
+
+    /// The response carried more than one `Sec-WebSocket-Extensions` field line.
+    /// RFC 6455 section 11.3.2: the field "MAY appear multiple times in an HTTP
+    /// request ... However, [it] MUST NOT appear more than once in an HTTP
+    /// response."
+    ///
+    /// Counted before the field is parsed, so this outranks both a grammar fault
+    /// on a repeated line and the shape carrying no `permessage-deflate` at all,
+    /// which would otherwise decline and hand the host an uncompressed
+    /// connection with no error.
+    #[error("Sec-WebSocket-Extensions must not appear more than once in a response")]
+    RepeatedResponseHeader,
 
     /// The client required `server_no_context_takeover` and the response did not
     /// confirm it.

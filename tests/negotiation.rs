@@ -1,4 +1,5 @@
 //! The RFC 7692 negotiation matrix, driven through the public API only.
+#![expect(clippy::expect_used, clippy::unwrap_used, reason = "a panic is how a test reports")]
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
@@ -139,10 +140,23 @@ fn a_trailing_escape_errors() {
 
 #[test]
 fn an_unterminated_quote_hides_no_deflate_offer_from_a_server() {
-    // The same input on the server side declines instead of erroring: refusing
-    // the whole upgrade over an extension header is a denial-of-service lever.
-    let request = headers(&[br#"permessage-deflate; x="open"#]);
-    assert!(ServerHandshake::accept(ServerConfig::new(), &request).is_none());
+    // Two inputs because two mutants reach a selection by different routes. If
+    // quotes stop delimiting, the hidden comma splits and the second
+    // alternative becomes selectable. If quotes still delimit but the imbalance
+    // stops being an error, the first alternative does. One input on its own
+    // declines on the unknown parameter under the other mutant and proves
+    // nothing about the server path.
+    for offer in [
+        br#"permessage-deflate; x="open, permessage-deflate"#.as_slice(),
+        br#"permessage-deflate, x-other; note="oops"#.as_slice(),
+    ] {
+        let request = headers(&[offer]);
+        assert!(
+            ServerHandshake::accept(ServerConfig::new(), &request).is_none(),
+            "{}",
+            String::from_utf8_lossy(offer)
+        );
+    }
 }
 
 #[test]
@@ -279,11 +293,51 @@ fn a_client_window_below_the_buildable_floor_is_rejected() {
 }
 
 #[test]
+fn a_valueless_server_window_in_a_response_is_rejected() {
+    let error =
+        client_round_trip(ClientConfig::new(), &[b"permessage-deflate; server_max_window_bits"])
+            .expect_err("server_max_window_bits carries a width or it says nothing");
+    assert_eq!(error, NegotiationError::ParameterArity);
+}
+
+#[test]
 fn a_valueless_client_window_in_a_response_is_rejected() {
     let error =
         client_round_trip(ClientConfig::new(), &[b"permessage-deflate; client_max_window_bits"])
             .expect_err("a response must state the chosen width");
     assert_eq!(error, NegotiationError::ClientWindowValueless);
+}
+
+/// Every other bounded-offer row is a rejection, so an over-rejecting mutant
+/// passes all of them. This is the row that says the conforming response is
+/// accepted and that each answered value reaches the agreement.
+#[test]
+fn a_bounded_offer_accepts_the_response_that_answers_it() {
+    let config = ClientConfig::new()
+        .server_no_context_takeover(true)
+        .server_max_window_bits(10)
+        .expect("10 is a legal peer bound")
+        .client_max_window_bits(11)
+        .expect("11 is a legal local bound");
+    let agreed = client_round_trip(
+        config,
+        &[b"permessage-deflate; server_no_context_takeover; server_max_window_bits=10; \
+            client_max_window_bits=11"],
+    )
+    .expect("the response answers every offered bound")
+    .expect("the server selected it");
+    assert!(agreed.peer_no_context_takeover());
+    assert_eq!(agreed.peer_max_window_bits(), 10);
+    assert_eq!(agreed.local_max_window_bits(), 11);
+}
+
+#[test]
+fn a_response_may_narrow_below_the_offered_bound() {
+    let config = ClientConfig::new().server_max_window_bits(10).expect("legal");
+    let agreed = client_round_trip(config, &[b"permessage-deflate; server_max_window_bits=9"])
+        .expect("narrower than offered is inside the offer")
+        .expect("the server selected it");
+    assert_eq!(agreed.peer_max_window_bits(), 9);
 }
 
 #[test]
@@ -331,8 +385,18 @@ fn sealing_detects_removal_replacement_and_duplication() {
     for (name, final_request) in [
         ("removed", headers(&[])),
         ("replaced", headers(&[b"permessage-deflate; server_max_window_bits=9"])),
+        // The exact installed value twice is what isolates multiplicity: the
+        // byte-equality guard passes both elements, so only the count guard can
+        // reject it. A second element that differs never reaches the count.
         (
-            "duplicated",
+            "duplicated exactly",
+            headers(&[
+                b"permessage-deflate; client_max_window_bits",
+                b"permessage-deflate; client_max_window_bits",
+            ]),
+        ),
+        (
+            "duplicated and rewritten",
             headers(&[b"permessage-deflate; client_max_window_bits", b"permessage-deflate"]),
         ),
     ] {
@@ -362,12 +426,28 @@ fn server_select(config: ServerConfig, request: &[&[u8]]) -> Option<(String, Neg
     Some((proposed, agreed.expect("the proposal selected it")))
 }
 
+/// Two supportable alternatives, so first-acceptable and last-acceptable
+/// disagree here. The skip-unsupported row below cannot tell them apart: its
+/// only acceptable alternative is the last one either rule would reach.
 #[test]
 fn the_server_takes_the_first_acceptable_alternative() {
+    let (proposed, agreed) = server_select(
+        ServerConfig::new(),
+        &[b"permessage-deflate; server_max_window_bits=12, \
+            permessage-deflate; server_max_window_bits=10"],
+    )
+    .expect("both alternatives are supportable");
+    assert_eq!(proposed, "permessage-deflate; server_max_window_bits=12");
+    assert_eq!(agreed.local_max_window_bits(), 12);
+}
+
+#[test]
+fn the_server_skips_an_unsupportable_alternative() {
     // The first demands an 8-bit server compressor, which cannot be built.
     let (proposed, agreed) = server_select(
         ServerConfig::new(),
-        &[b"permessage-deflate; server_max_window_bits=8, permessage-deflate; server_max_window_bits=12"],
+        &[b"permessage-deflate; server_max_window_bits=8, \
+            permessage-deflate; server_max_window_bits=12"],
     )
     .expect("the second alternative is supportable");
     assert_eq!(proposed, "permessage-deflate; server_max_window_bits=12");
@@ -391,9 +471,32 @@ fn the_server_accepts_a_peer_window_of_eight() {
 
 #[test]
 fn the_server_declines_an_unknown_parameter_and_takes_the_next() {
+    // The unknown parameter sits beside a supported one, so dropping it and
+    // accepting this alternative renders `server_max_window_bits=12` while
+    // declining it renders bare. Two bare alternatives render the same bytes.
     let (proposed, _) = server_select(
         ServerConfig::new(),
-        &[b"permessage-deflate; nonstandard=1, permessage-deflate"],
+        &[b"permessage-deflate; nonstandard=1; server_max_window_bits=12, \
+            permessage-deflate"],
+    )
+    .expect("the second alternative is clean");
+    assert_eq!(proposed, "permessage-deflate");
+}
+
+#[test]
+fn a_sole_unknown_parameter_leaves_the_server_nothing_to_select() {
+    assert!(server_select(ServerConfig::new(), &[b"permessage-deflate; nonstandard=1"]).is_none());
+}
+
+#[test]
+fn the_server_declines_a_valueless_server_window_and_takes_the_next() {
+    // `ParameterArity` has two constructor paths — a valued takeover flag and a
+    // valueless `server_max_window_bits`. This is the second one, on the path
+    // where an arity break declines one alternative rather than failing.
+    let (proposed, _) = server_select(
+        ServerConfig::new(),
+        &[b"permessage-deflate; server_max_window_bits; client_no_context_takeover, \
+            permessage-deflate"],
     )
     .expect("the second alternative is clean");
     assert_eq!(proposed, "permessage-deflate");
@@ -419,6 +522,34 @@ fn a_valueless_client_window_lets_the_server_choose() {
             .expect("the offer invited a bound");
     assert_eq!(proposed, "permessage-deflate; client_max_window_bits=10");
     assert_eq!(agreed.peer_max_window_bits(), 10);
+}
+
+#[test]
+fn the_server_echoes_an_offered_server_takeover() {
+    let (proposed, agreed) =
+        server_select(ServerConfig::new(), &[b"permessage-deflate; server_no_context_takeover"])
+            .expect("the offer is supportable as written");
+    assert_eq!(proposed, "permessage-deflate; server_no_context_takeover");
+    assert!(agreed.local_no_context_takeover());
+}
+
+/// Configured policy has to reach two places, and a mutant can drop either one
+/// while the other still looks right: the header the peer reads, and the
+/// agreement this side runs its own compressor from.
+#[test]
+fn a_server_window_policy_reaches_the_response_and_the_agreement() {
+    let config = ServerConfig::new()
+        .server_no_context_takeover(true)
+        .server_max_window_bits(12)
+        .expect("12 is a legal local bound");
+    let (proposed, agreed) = server_select(config, &[b"permessage-deflate"])
+        .expect("a bare offer accepts any narrowing the server imposes");
+    assert_eq!(
+        proposed,
+        "permessage-deflate; server_no_context_takeover; server_max_window_bits=12"
+    );
+    assert!(agreed.local_no_context_takeover());
+    assert_eq!(agreed.local_max_window_bits(), 12);
 }
 
 #[test]
@@ -500,7 +631,13 @@ fn peer_windows_admit_eight() {
     for bits in [0, 7, 16, 255] {
         assert_eq!(
             ClientConfig::new().server_max_window_bits(bits).unwrap_err(),
-            ConfigError::PeerWindowBits
+            ConfigError::PeerWindowBits,
+            "client bound on the server window {bits}"
+        );
+        assert_eq!(
+            ServerConfig::new().client_max_window_bits(bits).unwrap_err(),
+            ConfigError::PeerWindowBits,
+            "server bound on the client window {bits}"
         );
     }
 }

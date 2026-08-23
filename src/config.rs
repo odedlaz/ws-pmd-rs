@@ -97,19 +97,19 @@ impl ClientConfig {
         Ok(self)
     }
 
-    pub(crate) fn requires_server_no_context_takeover(self) -> bool {
+    pub(crate) const fn requires_server_no_context_takeover(self) -> bool {
         self.server_no_context_takeover
     }
 
-    pub(crate) fn offers_client_no_context_takeover(self) -> bool {
+    pub(crate) const fn offers_client_no_context_takeover(self) -> bool {
         self.client_no_context_takeover
     }
 
-    pub(crate) fn offered_server_max_window_bits(self) -> u8 {
+    pub(crate) const fn offered_server_max_window_bits(self) -> u8 {
         self.server_max_window_bits
     }
 
-    pub(crate) fn offered_client_max_window_bits(self) -> u8 {
+    pub(crate) const fn offered_client_max_window_bits(self) -> u8 {
         self.client_max_window_bits
     }
 }
@@ -169,19 +169,19 @@ impl ServerConfig {
         Ok(self)
     }
 
-    pub(crate) fn imposes_server_no_context_takeover(self) -> bool {
+    pub(crate) const fn imposes_server_no_context_takeover(self) -> bool {
         self.server_no_context_takeover
     }
 
-    pub(crate) fn imposes_client_no_context_takeover(self) -> bool {
+    pub(crate) const fn imposes_client_no_context_takeover(self) -> bool {
         self.client_no_context_takeover
     }
 
-    pub(crate) fn supported_server_max_window_bits(self) -> u8 {
+    pub(crate) const fn supported_server_max_window_bits(self) -> u8 {
         self.server_max_window_bits
     }
 
-    pub(crate) fn supported_client_max_window_bits(self) -> u8 {
+    pub(crate) const fn supported_client_max_window_bits(self) -> u8 {
         self.client_max_window_bits
     }
 }

@@ -36,8 +36,15 @@ impl ServerHandshake {
                 return None;
             };
             for element in elements {
-                if grammar::is_blank(element) || !grammar::is_deflate(element) {
+                if grammar::is_blank(element) {
                     continue;
+                }
+                match grammar::is_deflate(element) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    // Unreadable bytes get no answer. This signature has no
+                    // shape in which to say so, so it declines instead.
+                    Err(_) => return None,
                 }
                 // A single unsupported alternative declines itself; the client
                 // may have written a weaker one after it.
@@ -78,7 +85,7 @@ impl ServerHandshake {
         let mut found = 0usize;
         for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
             for element in grammar::elements(value.as_bytes())? {
-                if !grammar::is_deflate(element) {
+                if !grammar::is_deflate(element)? {
                     continue;
                 }
                 found += 1;

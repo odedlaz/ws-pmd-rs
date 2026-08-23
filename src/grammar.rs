@@ -8,7 +8,7 @@
 use crate::error::NegotiationError;
 
 /// The extension token this crate implements.
-pub(crate) const NAME: &str = "permessage-deflate";
+pub const NAME: &str = "permessage-deflate";
 
 /// Split on `delimiter`, honouring quoted strings and quoted pairs.
 ///
@@ -45,18 +45,20 @@ fn split(value: &[u8], delimiter: u8) -> Result<Vec<&[u8]>, NegotiationError> {
 }
 
 /// Split one header line into its comma-separated extension elements.
-pub(crate) fn elements(value: &[u8]) -> Result<Vec<&[u8]>, NegotiationError> {
+pub fn elements(value: &[u8]) -> Result<Vec<&[u8]>, NegotiationError> {
     split(value, b',')
 }
 
 /// Split one element into its name and its semicolon-separated parameters.
 ///
-/// The element is already quote-balanced, so this cannot fail.
-fn segments(element: &[u8]) -> Vec<&[u8]> {
-    split(element, b';').unwrap_or_else(|_| vec![element])
+/// Unreachable today — every caller comes through [`elements`], whose parts are
+/// provably quote-balanced. It propagates anyway: answering "not
+/// permessage-deflate" for an unbalanced element manufactures a classification.
+fn segments(element: &[u8]) -> Result<Vec<&[u8]>, NegotiationError> {
+    split(element, b';')
 }
 
-pub(crate) fn trim(value: &[u8]) -> &[u8] {
+pub fn trim(value: &[u8]) -> &[u8] {
     let start = value.iter().position(|byte| !byte.is_ascii_whitespace()).unwrap_or(value.len());
     let end = value.iter().rposition(|byte| !byte.is_ascii_whitespace()).map_or(start, |i| i + 1);
     value.get(start..end).unwrap_or_default()
@@ -64,22 +66,26 @@ pub(crate) fn trim(value: &[u8]) -> &[u8] {
 
 /// Whether this element names `permessage-deflate`.
 ///
-/// Extension names are HTTP tokens and match case-insensitively.
-pub(crate) fn is_deflate(element: &[u8]) -> bool {
-    let Some(name) = segments(element).first().copied() else { return false };
-    trim(name).eq_ignore_ascii_case(NAME.as_bytes())
+/// Case-folded by decision, not by HTTP: RFC 6455 defines `extension-token` as
+/// an RFC 2616 `token` and says nothing about how to compare one, and HTTP
+/// field *values* are case-sensitive by default. The leniency mirrors the
+/// extraction source.
+pub fn is_deflate(element: &[u8]) -> Result<bool, NegotiationError> {
+    let segments = segments(element)?;
+    let name = segments.first().copied().unwrap_or_default();
+    Ok(trim(name).eq_ignore_ascii_case(NAME.as_bytes()))
 }
 
 /// Whether an element is entirely whitespace, which an empty list position
 /// produces and which RFC 7230 list rules permit.
-pub(crate) fn is_blank(element: &[u8]) -> bool {
+pub fn is_blank(element: &[u8]) -> bool {
     trim(element).is_empty()
 }
 
 /// The valueless form of `client_max_window_bits` is meaningful on its own: in an
 /// offer it advertises that the client can honour any width the server picks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ClientWindow {
+pub enum ClientWindow {
     #[default]
     Absent,
     Valueless,
@@ -91,19 +97,19 @@ pub(crate) enum ClientWindow {
 /// This is what was written, not what was agreed. Correspondence rules are
 /// applied by the client and server handshakes against their own offer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Params {
-    pub(crate) server_no_context_takeover: bool,
-    pub(crate) client_no_context_takeover: bool,
-    pub(crate) server_max_window_bits: Option<u8>,
-    pub(crate) client_max_window_bits: ClientWindow,
+pub struct Params {
+    pub server_no_context_takeover: bool,
+    pub client_no_context_takeover: bool,
+    pub server_max_window_bits: Option<u8>,
+    pub client_max_window_bits: ClientWindow,
 }
 
 /// Decode the parameters of an element already known to name `permessage-deflate`.
 ///
 /// Unknown parameters are rejected: this crate implements PMD only, and an
 /// extension it does not fully understand cannot be safely agreed to.
-pub(crate) fn parse_params(element: &[u8]) -> Result<Params, NegotiationError> {
-    let segments = segments(element);
+pub fn parse_params(element: &[u8]) -> Result<Params, NegotiationError> {
+    let segments = segments(element)?;
     // Each parameter is staged in its own `Option`, so "already seen" is the
     // slot being full rather than a parallel bookkeeping flag that can drift
     // out of step with the value it is supposed to describe.
@@ -150,7 +156,7 @@ fn set_once<T>(slot: &mut Option<T>, value: T) -> Result<(), NegotiationError> {
 }
 
 /// A flag parameter carries no value; `x=` and `x=y` are both arity errors.
-fn no_value(value: Option<&[u8]>) -> Result<bool, NegotiationError> {
+const fn no_value(value: Option<&[u8]>) -> Result<bool, NegotiationError> {
     match value {
         None => Ok(true),
         Some(_) => Err(NegotiationError::ParameterArity),
@@ -158,14 +164,9 @@ fn no_value(value: Option<&[u8]>) -> Result<bool, NegotiationError> {
 }
 
 fn split_parameter(segment: &[u8]) -> (&[u8], Option<&[u8]>) {
-    match segment.iter().position(|byte| *byte == b'=') {
-        Some(index) => {
-            let name = segment.get(..index).unwrap_or_default();
-            let value = segment.get(index + 1..).unwrap_or_default();
-            (name, Some(value))
-        }
-        None => (segment, None),
-    }
+    segment.iter().position(|byte| *byte == b'=').map_or((segment, None), |index| {
+        (segment.get(..index).unwrap_or_default(), segment.get(index + 1..))
+    })
 }
 
 /// Window widths are `1*DIGIT` in 8..=15, optionally quoted.

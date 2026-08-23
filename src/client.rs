@@ -67,7 +67,7 @@ impl ClientOffer {
         let mut found = 0usize;
         for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
             for element in grammar::elements(value.as_bytes())? {
-                if !grammar::is_deflate(element) {
+                if !grammar::is_deflate(element)? {
                     continue;
                 }
                 found += 1;
@@ -181,7 +181,7 @@ fn render_offer(config: ClientConfig) -> HeaderValue {
 fn contains_deflate(headers: &HeaderMap) -> Result<bool, NegotiationError> {
     for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
         for element in grammar::elements(value.as_bytes())? {
-            if grammar::is_deflate(element) {
+            if grammar::is_deflate(element)? {
                 return Ok(true);
             }
         }
@@ -194,7 +194,7 @@ fn sole_deflate(headers: &HeaderMap) -> Result<Option<Params>, NegotiationError>
     let mut selected = None;
     for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {
         for element in grammar::elements(value.as_bytes())? {
-            if grammar::is_blank(element) || !grammar::is_deflate(element) {
+            if grammar::is_blank(element) || !grammar::is_deflate(element)? {
                 continue;
             }
             if selected.replace(grammar::parse_params(element)?).is_some() {

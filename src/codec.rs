@@ -145,12 +145,17 @@ impl Decoder {
             let produced_so_far = self.delivered.saturating_add(output.len());
             let remaining = limit.0.saturating_sub(produced_so_far);
             // The `+ 1` is the whole detector. Leaving room for exactly one byte
-            // past the ceiling means the overrun is observed as it is produced,
+            // past the ceiling means the overrun is observed as it is produced
             // rather than after a full scratch buffer has been materialised, so
-            // a bomb is stopped during inflate and the reported size is always
-            // one over rather than up to a chunk over.
+            // a bomb is stopped during inflate. `remaining` saturates at zero:
+            // once the ceiling has fallen below what was already delivered, that
+            // one byte is past the delivery, not past the ceiling.
             let writable = remaining.saturating_add(1).min(scratch.len());
             let before = (self.inflater.total_in(), self.inflater.total_out());
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "`writable` is min-ed with scratch.len() four lines above"
+            )]
             let status = self
                 .inflater
                 .decompress(input, &mut scratch[..writable], FlushDecompress::None)
@@ -158,12 +163,21 @@ impl Decoder {
             let consumed = advance(before.0, self.inflater.total_in(), input.len());
             let produced = advance(before.1, self.inflater.total_out(), writable);
 
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "`advance` clamps to `writable`, itself within scratch.len()"
+            )]
             output.extend_from_slice(&scratch[..produced]);
             let size = self.delivered.saturating_add(output.len());
             if size > limit.0 {
                 return Err(CodecError::MessageTooLong { size, limit: limit.0 });
             }
-            input = &input[consumed..];
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "`advance` clamps to the `input.len()` it was handed"
+            )]
+            let unconsumed = &input[consumed..];
+            input = unconsumed;
 
             if status == Status::StreamEnd {
                 // The peer flushed with BFINAL set, which ends the DEFLATE
@@ -192,7 +206,7 @@ fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
 /// Zero progress reported as success is the stall: the caller would spin on it
 /// forever. Zero progress with `BufError` or `StreamEnd` is ordinary
 /// termination — out of input, out of room, or done.
-fn progress(status: Status, consumed: usize, produced: usize) -> Result<bool, CodecError> {
+const fn progress(status: Status, consumed: usize, produced: usize) -> Result<bool, CodecError> {
     if consumed != 0 || produced != 0 {
         return Ok(true);
     }
@@ -203,6 +217,7 @@ fn progress(status: Status, consumed: usize, produced: usize) -> Result<bool, Co
 }
 
 #[cfg(test)]
+#[expect(clippy::panic, reason = "a panic is how a test reports")]
 mod tests {
     use super::{advance, progress, CodecError, Status};
 

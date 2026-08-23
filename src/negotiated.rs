@@ -11,7 +11,7 @@ use crate::grammar::NAME;
 /// other. Keeping the role private lets callers ask about "this side" and "the
 /// other side" without re-deriving the mapping at every call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Role {
+pub enum Role {
     Client,
     Server,
 }
@@ -54,7 +54,7 @@ pub struct Negotiated {
 }
 
 impl Negotiated {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         role: Role,
         server_no_context_takeover: bool,
         client_no_context_takeover: bool,
@@ -113,7 +113,7 @@ impl Negotiated {
 }
 
 /// The `client_max_window_bits` form to render.
-pub(crate) enum ClientBits {
+pub enum ClientBits {
     /// Omit the parameter.
     Omit,
     /// Emit it with no value. Legal in an offer only.
@@ -127,7 +127,7 @@ pub(crate) enum ClientBits {
 /// Every byte comes from a fixed token or an ASCII digit, so the result is
 /// always a valid `HeaderValue`; `render_is_always_valid` proves it across every
 /// reachable combination.
-pub(crate) fn render(
+pub fn render(
     server_no_context_takeover: bool,
     client_no_context_takeover: bool,
     server_max_window_bits: Option<u8>,
@@ -152,6 +152,10 @@ pub(crate) fn render(
             value.push_str(&bits.to_string());
         }
     }
+    #[expect(
+        clippy::expect_used,
+        reason = "render_is_always_valid exhausts this function's input space"
+    )]
     HeaderValue::from_str(&value).expect("every rendered byte is a fixed token or an ASCII digit")
 }
 

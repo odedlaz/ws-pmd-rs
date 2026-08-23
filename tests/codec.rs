@@ -4,6 +4,12 @@
 //! a peer built directly on `flate2` in this file, never from this crate's
 //! encoder. A round trip through one implementation's own two halves cannot tell
 //! a correct codec from two matching mistakes.
+#![expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "a panic is how a test reports"
+)]
 
 use flate2::{Compress, Compression, FlushCompress};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
@@ -422,4 +428,36 @@ fn peer_no_context_takeover_drops_the_window_between_messages() {
         !matches!(second.as_deref(), Ok(b"Hello")),
         "a dropped window cannot resolve a back-reference into the previous message, got {second:?}"
     );
+}
+
+/// `MessageTooLong.size` is one past `limit` only while the ceiling still
+/// exceeds what this message already delivered. Two rows, because a single one
+/// cannot separate "one past the ceiling" from "one past the delivery" — and
+/// the pair is what makes `size - limit` unusable, which the variant now says.
+#[test]
+fn a_lowered_ceiling_above_the_delivery_stops_one_past_the_ceiling() {
+    let mut peer = Peer::new(15);
+    let (head, tail) = peer.send_in_two(&vec![b'a'; 3000], &vec![b'b'; 3000]);
+    let mut decoder = plain_decoder();
+    let delivered = decoder.decompress(&head, false, ROOMY).expect("the first fragment fits");
+    assert_eq!(delivered.len(), 3000);
+    let error = decoder
+        .decompress(&tail, true, DecompressedLimit::bytes(4000))
+        .expect_err("the message runs past the lowered ceiling");
+    assert_eq!(error, CodecError::MessageTooLong { size: 4001, limit: 4000 });
+}
+
+#[test]
+fn a_lowered_ceiling_below_the_delivery_stops_one_past_the_delivery() {
+    let mut peer = Peer::new(15);
+    let (head, tail) = peer.send_in_two(&vec![b'a'; 3000], &vec![b'b'; 3000]);
+    let mut decoder = plain_decoder();
+    let delivered = decoder.decompress(&head, false, ROOMY).expect("the first fragment fits");
+    assert_eq!(delivered.len(), 3000);
+    let error = decoder
+        .decompress(&tail, true, DecompressedLimit::bytes(2000))
+        .expect_err("the ceiling is already below what was delivered");
+    // 3001, not 2001: the ceiling fell under the delivery, so `size - limit` is
+    // 1001 here and 1 in the row above. A host cannot read a chunk size off it.
+    assert_eq!(error, CodecError::MessageTooLong { size: 3001, limit: 2000 });
 }

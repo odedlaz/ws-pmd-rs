@@ -10,6 +10,7 @@ rust-version = "1.85"
 
 [dependencies]
 http = "1"
+thiserror = "2"
 
 # 1.0.31 is the floor because it is the first release that *works*, not the
 # first that offers `zlib-rs`. 1.0.29 and 1.0.30 both require
@@ -36,8 +37,36 @@ features = ["zlib-rs"]
 missing_docs = "warn"
 unsafe_code = "forbid"
 
+# Two invocations, and neither replaces the other. `cargo clippy --locked` is
+# the gate, and it sees production code only, which is what clippy checks by
+# default. `cargo clippy --locked --all-targets` runs in addition, as a
+# superset: it is what caught four `similar_names` in `tests/codec.rs` that the
+# gate by itself cannot see.
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
 # Every fallible signature here names its error type, and NegotiationError's
 # variants are documented one by one. A per-function restatement would drift.
 missing_errors_doc = "allow"
+
+# `const` on a public item is a semver commitment: adding it is backward
+# compatible, taking it away later is breaking. Crate-internal items take this
+# lint wherever it asks. A public item opts in by being written `const`
+# deliberately, not by satisfying a lint at 0.1 that constrains internals which
+# are not written yet.
+missing_const_for_fn = "allow"
+
+# Nothing in production may panic, index, or exit out of band. The four sites
+# that would are each `#[expect]`-ed at the site with the invariant named and a
+# test pinning it, so the allowance goes red if the invariant stops holding.
+# Test modules opt out at the file or module level, where a panic is the
+# reporting mechanism rather than a failure mode.
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+fallible_impl_from = "deny"

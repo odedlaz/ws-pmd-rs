@@ -294,7 +294,16 @@ impl Decoder {
             if !self.stream_open {
                 return Err(CodecError::InvalidStream);
             }
-            self.inflate(TRAILER, limit, output)?;
+            // The block the octets complete is never the last one: step 2's
+            // appended block is `BFINAL` unset, so a conforming payload carries
+            // its own `BFINAL` block whole and ends inside the appended one. A
+            // stream ending here means the peer's did not, and the answer cannot
+            // be read off `stream_open` afterwards -- the reinitialisation a
+            // stream end performs feeds the octets left over to a fresh
+            // inflater, which reopens it.
+            if self.inflate(TRAILER, limit, output)? {
+                return Err(CodecError::InvalidStream);
+            }
             if self.reset_between_messages {
                 self.reinitialise();
             }
@@ -302,12 +311,15 @@ impl Decoder {
         Ok(())
     }
 
+    /// Feed `input` until the inflater takes no more, reporting whether any step
+    /// ended a DEFLATE stream.
     fn inflate(
         &mut self,
         mut input: &[u8],
         limit: DecompressedLimit,
         output: &mut Vec<u8>,
-    ) -> Result<(), CodecError> {
+    ) -> Result<bool, CodecError> {
+        let mut ended_a_stream = false;
         let mut scratch = [0u8; SCRATCH];
         loop {
             let produced_so_far = self.delivered.saturating_add(output.len());
@@ -344,6 +356,7 @@ impl Decoder {
                 // and keep reading. Stopping here truncates a conforming
                 // message; leaving the inflater finished makes every later
                 // message decode to nothing.
+                ended_a_stream = true;
                 self.reinitialise();
             } else if step.remaining.is_some_and(|rest| rest.len() < input.len()) {
                 // Consuming a byte is what opens a stream, and only a step that
@@ -352,7 +365,7 @@ impl Decoder {
             }
             match step.remaining {
                 Some(rest) => input = rest,
-                None => return Ok(()),
+                None => return Ok(ended_a_stream),
             }
         }
     }

@@ -139,6 +139,17 @@ fn bfinal_message(plain: &[u8]) -> Vec<u8> {
     wire
 }
 
+/// The conforming empty `BFINAL` message with its last two octets dropped, so the
+/// fixed block's end-of-block symbol is two bits short of arriving. Section 7.2.1
+/// leaves a payload's own blocks whole, so no producer can emit this and only the
+/// rejection rows may use it.
+fn a_bfinal_stream_only_the_trailer_completes() -> Vec<u8> {
+    let mut wire = bfinal_message(b"");
+    assert_eq!(wire, [0x03, 0x00, 0x00], "an empty BFINAL block, then the octet 7.2.3.4 leaves");
+    wire.truncate(1);
+    wire
+}
+
 /// A payload long enough that a corrupted inflater state shows up as wrong bytes
 /// rather than surviving by being too short to matter.
 fn structured_payload(len: u32) -> Vec<u8> {
@@ -243,6 +254,19 @@ fn rfc_7692_7_2_1_a_second_stream_follows_a_bfinal_block_in_one_message() {
     wire.extend(Peer::new(15).send(b"World"));
     let decoded = plain_decoder().decompress(&wire, true, ROOMY).expect("a legal message");
     assert_eq!(decoded, b"HelloWorld", "everything after the BFINAL block belongs to it");
+}
+
+/// Both streams `BFINAL`, which is the conforming shape that ends the most streams
+/// and ends one closest to the trailer: the second `BFINAL` block is whole inside
+/// the payload, and the octet after it is all the trailer has left to complete.
+/// A rejection rule that watched for a stream ending anywhere near the end of a
+/// message instead of during the trailer itself would fail here.
+#[test]
+fn rfc_7692_7_2_1_two_bfinal_streams_in_one_message() {
+    let mut wire = bare_finished_stream(b"Hello");
+    wire.extend(bfinal_message(b"World"));
+    let decoded = plain_decoder().decompress(&wire, true, ROOMY).expect("a legal message");
+    assert_eq!(decoded, b"HelloWorld", "two closed streams, one message");
 }
 
 /// The same message, split at the stream boundary. Section 7.2.1 says the removal
@@ -379,6 +403,19 @@ fn an_empty_message_is_rejected() {
     );
 }
 
+/// The octet itself, though, is a whole message. Section 7.2.3.6 builds it that
+/// way -- "an empty uncompressed DEFLATE block can be built and used for this
+/// purpose as follows: 0x00" -- and the trailer completes that block, so no
+/// stream ends anywhere in it.
+#[test]
+fn rfc_7692_7_2_3_6_a_one_octet_empty_message_decodes() {
+    assert_eq!(
+        plain_decoder().decompress(&[0x00], true, ROOMY).expect("the RFC's own empty message"),
+        b"",
+        "one begun block, which the stripped octets complete"
+    );
+}
+
 /// And after a `no_context_takeover` reinitialisation, which is the other place
 /// the inflater goes back to the start of a stream. A decoder that reinitialised
 /// there without putting the position back would take the next message's stripped
@@ -393,6 +430,60 @@ fn an_empty_message_is_rejected_after_a_no_takeover_reinitialisation() {
         decoder.decompress(&[], true, ROOMY),
         Err(CodecError::InvalidStream),
         "the reinitialisation put the inflater back at a stream start"
+    );
+}
+
+/// A payload whose `BFINAL` stream is finished only by the trailer the decoder
+/// adds -- a stream the peer never finished, for the reason `Decoder::decode`
+/// gives. Rejecting it is what keeps the corruption out of the next message, and
+/// the follow-up is a stored-block peer because that is the shape whose first
+/// bytes used to satisfy the leftover length field and arrive as content.
+#[test]
+fn a_bfinal_stream_only_the_trailer_completes_is_rejected() {
+    let mut decoder = plain_decoder();
+    assert_eq!(
+        decoder.decompress(&a_bfinal_stream_only_the_trailer_completes(), true, ROOMY),
+        Err(CodecError::InvalidStream),
+        "the peer's own bytes never finished its stream"
+    );
+    assert_eq!(
+        decoder.decompress(&Peer::uncompressed().send(b"anything"), true, ROOMY),
+        Err(CodecError::Poisoned),
+        "and every failure here is terminal"
+    );
+}
+
+/// The same input under `no_context_takeover`, where the reinitialisation at the
+/// message boundary wipes the corrupt state before the next message can observe
+/// it. The acceptance is silent there, so only the rejection itself is visible --
+/// which is exactly why this arm needs its own row.
+#[test]
+fn a_bfinal_stream_only_the_trailer_completes_is_rejected_without_context_takeover() {
+    let mut decoder = decoder_for(b"permessage-deflate; server_no_context_takeover");
+    assert_eq!(
+        decoder.decompress(&a_bfinal_stream_only_the_trailer_completes(), true, ROOMY),
+        Err(CodecError::InvalidStream),
+        "the reset between messages hides the damage, it does not license the input"
+    );
+}
+
+/// The conforming twin, two octets longer: an empty `BFINAL` block that finishes
+/// inside the payload, then the octet section 7.2.3.4 leaves behind. Here the
+/// stream ends on the peer's own bytes and the trailer completes the appended
+/// block, so this is the row that fails if the rejection above over-reaches.
+#[test]
+fn rfc_7692_7_2_3_4_an_empty_bfinal_message_decodes() {
+    let mut decoder = plain_decoder();
+    assert_eq!(
+        decoder.decompress(&bfinal_message(b""), true, ROOMY).expect("a legal message"),
+        b"",
+        "an empty message, ended by the peer"
+    );
+    let next = structured_payload(4_096);
+    assert_eq!(
+        decoder.decompress(&Peer::new(15).send(&next), true, ROOMY).expect("the next message"),
+        next,
+        "and the message after it is exact"
     );
 }
 

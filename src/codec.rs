@@ -17,7 +17,16 @@ use crate::negotiated::Negotiated;
 /// The trailer RFC 7692 section 7.2.1 strips from every compressed message.
 const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 
-/// Output taken from the backend per call. Matches the extraction source.
+/// Output taken from the backend per call, and the stack this decoder costs
+/// while one is in flight.
+///
+/// One hard constraint: at least 1. The ceiling detector asks the backend for
+/// one byte past the remaining allowance, so a zero-length buffer makes every
+/// call produce nothing and the stall guard reports a backend that never
+/// moved. Measured, not argued -- at 0 the codec suite fails 22 of 23 rows, at
+/// 1 and at 16 it passes all 23. Everything above 1 trades backend round trips
+/// against stack, and correctness does not depend on where in that range this
+/// sits. 4096 is the value the extraction source used.
 const SCRATCH: usize = 4096;
 
 /// The narrowest inflater `flate2` will construct.

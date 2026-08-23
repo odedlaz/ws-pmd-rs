@@ -824,10 +824,7 @@ fn a_duplicated_response_extension_is_rejected() {
             .expect("the request is conforming")
             .expect("selected");
     let error = handshake
-        .finish(
-            &headers(&[b"permessage-deflate", b"permessage-deflate"]),
-            PmdComposition::Compatible,
-        )
+        .finish(&headers(&[b"permessage-deflate, permessage-deflate"]), PmdComposition::Compatible)
         .expect_err("one selection only");
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
@@ -923,6 +920,9 @@ fn composition_is_irrelevant_when_the_response_dropped_the_selection() {
 /// so this is the row that pins the order of the arms rather than an early
 /// return. Without it the conflict check can widen to every count and still look
 /// correct: the removal row is decided by an earlier arm and cannot see it.
+///
+/// One field line carrying two elements, because two field lines no longer reach
+/// this code -- the cardinality check answers them first.
 #[test]
 fn a_duplicated_response_outranks_a_composition_conflict() {
     let handshake =
@@ -930,7 +930,7 @@ fn a_duplicated_response_outranks_a_composition_conflict() {
             .expect("the request is conforming")
             .expect("selected");
     let error = handshake
-        .finish(&headers(&[b"permessage-deflate", b"permessage-deflate"]), PmdComposition::Conflict)
+        .finish(&headers(&[b"permessage-deflate, permessage-deflate"]), PmdComposition::Conflict)
         .expect_err("both faults are present");
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
@@ -955,9 +955,10 @@ fn a_rewritten_response_outranks_a_composition_conflict() {
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
 
-/// RFC 6455 section 11.3.2, every shape the count has to separate. The repeated
-/// rows all minted a `Negotiated` before this rule existed except the last,
-/// which declined silently -- an uncompressed connection and no error at all.
+/// RFC 6455 section 11.3.2, every shape the count has to separate. The legal
+/// rows carry the discrimination: one field line stays legal however many
+/// elements it holds, so a check that counted elements rather than field lines
+/// fails here and nowhere else in this file.
 #[test]
 fn the_response_field_line_count_decides_before_any_selection() {
     let mints: &[&[&[u8]]] = &[&[b"permessage-deflate"], &[b"x-other, permessage-deflate"]];
@@ -984,9 +985,9 @@ fn the_response_field_line_count_decides_before_any_selection() {
 /// Cardinality outranks grammar: move the check below `grammar::validate` and
 /// the two repeated rows report `MalformedHeader` instead.
 ///
-/// The single-line row is the control and the load-bearing one -- a check that
-/// counted elements rather than field lines, or that ran unconditionally, would
-/// swallow ordinary grammar faults while every other row here still passed.
+/// The single-line row is the control, and what it holds is narrower than
+/// precedence -- a conforming field line keeps its ordinary grammar attribution,
+/// so the count cannot swallow `MalformedHeader`.
 #[test]
 fn a_repeated_response_field_outranks_a_grammar_fault_on_it() {
     let one_line = client_round_trip(ClientConfig::new(), &[b"permessage-deflate; ="])
@@ -1002,4 +1003,82 @@ fn a_repeated_response_field_outranks_a_grammar_fault_on_it() {
             .expect_err("the field is both repeated and malformed");
         assert_eq!(error, NegotiationError::RepeatedResponseHeader);
     }
+}
+
+/// `ServerHandshake::finish` reads a response the host is about to emit, so it
+/// owes the same three checks in the same order: field-line count, whole-field
+/// grammar, then correspondence with the proposal. `accept` keeps only the last
+/// two -- it reads a request, where a repeated field is legal.
+///
+/// Grammar is the layer that was missing. Without it `ResponseAltered` stands in
+/// for parsing by accident of the byte comparison, so it fires only on a
+/// malformed `permessage-deflate` element and never on a malformed element under
+/// any other name.
+#[test]
+fn the_server_checks_count_then_grammar_then_correspondence() {
+    let request = headers(&[b"permessage-deflate"]);
+    let finish = |response: &[&[u8]]| -> Result<Option<Negotiated>, NegotiationError> {
+        let handshake = ServerHandshake::accept(ServerConfig::new(), &request)
+            .expect("the request is conforming")
+            .expect("the server selects it");
+        assert_eq!(handshake.value(), "permessage-deflate", "the proposal these rows respond to");
+        handshake.finish(&headers(response), PmdComposition::Compatible)
+    };
+
+    for legal in [&[b"permessage-deflate" as &[u8]] as &[&[u8]], &[b"x-other, permessage-deflate"]]
+    {
+        assert!(
+            finish(legal).expect("one field line is legal").is_some(),
+            "the proposal is unaltered and the response carries one field"
+        );
+    }
+
+    // A parameter this crate knows only from PMD is ordinary grammar on an
+    // unknown extension. Both paths agree here, which is what makes the
+    // disagreements below discriminating rather than an artifact of the rig.
+    for declined in
+        [&[] as &[&[u8]], &[b"x-other" as &[u8]], &[b"x-other; server_max_window_bits=99"]]
+    {
+        assert!(finish(declined).expect("a well-formed response with no PMD").is_none());
+    }
+
+    for repeated in [
+        &[b"x-other" as &[u8], b"permessage-deflate"] as &[&[u8]],
+        &[b"permessage-deflate", b"x-other"],
+        &[b"permessage-deflate", b"permessage-deflate"],
+        &[b"x-a", b"permessage-deflate", b"x-b"],
+        &[b"x-a", b"x-b"],
+        &[b"x-other; =", b"permessage-deflate"],
+        &[b"permessage-deflate", b"x-other; ="],
+    ] {
+        assert_eq!(
+            finish(repeated).expect_err("a response carries one field line"),
+            NegotiationError::RepeatedResponseHeader,
+            "the count is read before the field is parsed, so it decides the last two rows too"
+        );
+    }
+
+    // Present-but-empty is one class with three members, and `""` is the one a
+    // real host emits -- joining an extension list that turned out empty. It only
+    // means anything against the absent row above, which must stay `Ok(None)`.
+    for malformed in [
+        &[b"permessage-deflate; =" as &[u8]] as &[&[u8]],
+        &[b"x-other; ="],
+        &[b"permessage-deflate, x-other; ="],
+        &[b""],
+        &[b",,"],
+        &[b" "],
+    ] {
+        assert_eq!(
+            finish(malformed).expect_err("the field does not parse"),
+            NegotiationError::MalformedHeader
+        );
+    }
+
+    assert_eq!(
+        finish(&[b"permessage-deflate; server_no_context_takeover"])
+            .expect_err("well formed, and not what the host was handed"),
+        NegotiationError::ResponseAltered,
+        "correspondence still owns the well-formed case, which is all its name ever claimed"
+    );
 }

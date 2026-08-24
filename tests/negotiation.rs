@@ -289,6 +289,31 @@ fn a_quoted_value_that_unescapes_to_a_non_token_is_malformed() {
     assert_eq!(error, NegotiationError::MalformedHeader);
 }
 
+/// `extension = extension-token *( ";" extension-param )`, so an element that
+/// starts at its own first `;` carries parameters and no token. That is a
+/// grammar break and not an extension this crate declines, which is where the
+/// element-level path would otherwise land: nothing in such an element is named
+/// `permessage-deflate`. `an_empty_list_position_beside_a_real_element_is_legal`
+/// is the control for the other side of the line -- an element with *nothing* in
+/// it is a legal empty list position.
+#[test]
+fn an_empty_extension_name_is_malformed_not_an_unknown_extension() {
+    for value in [
+        &b"; server_max_window_bits=10"[..],
+        b";permessage-deflate",
+        b"permessage-deflate, ; client_max_window_bits",
+    ] {
+        let shown = String::from_utf8_lossy(value);
+        let client = client_round_trip(ClientConfig::new(), &[value])
+            .expect_err("there is no token here to name an extension");
+        assert_eq!(client, NegotiationError::MalformedHeader, "{shown}");
+
+        let server = ServerHandshake::accept(ServerConfig::new(), &headers(&[value]))
+            .expect_err("there is no token here to name an extension");
+        assert_eq!(server, NegotiationError::MalformedHeader, "{shown}");
+    }
+}
+
 /// `extension-param = token [ "=" ... ]`, so an absent parameter name is a
 /// grammar break, not a parameter this crate happens not to know.
 #[test]

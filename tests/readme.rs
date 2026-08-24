@@ -2,11 +2,19 @@
 //!
 //! Each block appears exactly once in this file: as the body of a wrapper below, which is
 //! the copy the compiler checks. `every_readme_rust_block_is_pinned` then requires every
-//! ```rust fence in the README to appear verbatim in this file's own source, so a README
-//! edit that is not mirrored here turns the suite red rather than going unnoticed.
+//! fenced `rust` block in the README to appear verbatim in this file's own source, so a
+//! README edit that is not mirrored here turns the suite red rather than going unnoticed.
 //!
-//! Scope: this pins the blocks that exist. It says nothing about whether an example is
-//! *correct* -- only that it compiles and that the README still says what compiles.
+//! Two limits on what that buys, both deliberate.
+//!
+//! It says nothing about whether an example is *correct* -- only that it compiles, and that
+//! the README still says what compiles.
+//!
+//! It is scoped to `rust` fences, so the README's `toml` dependency block is outside the
+//! pin. That is not an oversight to correct: the block states how to depend on an
+//! unpublished crate, so it is expected to change on its own schedule, and pinning it would
+//! turn this test red at the next version bump for a reason nobody would connect to it.
+//! Adding a `toml` fence leaves the count alone; converting one to `rust` does not.
 //!
 //! The bodies sit at column 0 and the wrappers are `#[rustfmt::skip]`, because the pin is a
 //! byte comparison and any reindentation would break it.

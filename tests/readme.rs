@@ -20,8 +20,15 @@
 //! proves that what is not commented out compiles. Those are two facts, and a `/* */` around
 //! a body separates them -- the bytes stay byte-identical, the pin stays green, and nothing
 //! type-checks. Delimiting the bodies with markers and matching the region does not close
-//! that: a `/* */` placed around the markers themselves passes just as green, and any
-//! textual boundary can be enclosed the same way. Both were measured, not reasoned.
+//! that: a `/* */` placed around the markers themselves passes just as green. Both of those
+//! were measured.
+//!
+//! The general form is scoped to *byte-verbatim* matching: any boundary such a comparison can
+//! draw is enclosable the same way, because a byte comparison cannot tell code from a comment
+//! holding the same bytes. A token-level pin would not share that weakness -- comments are not
+//! tokens -- but that is reasoning, not a measurement, and it is deliberately not pursued. It
+//! buys resistance to tamper, which the paragraph below puts out of scope, and pays by
+//! comparing normalised tokens rather than the README's actual bytes.
 //!
 //! That is a limit, not a hole to engineer around. Every *accidental* edit is caught --
 //! changing a body, changing the README, commenting a body out line by line. Wrapping a body

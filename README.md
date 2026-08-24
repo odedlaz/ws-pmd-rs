@@ -29,7 +29,7 @@ permessage-deflate = { git = "https://github.com/odedlaz/ws-pmd-rs" }
 | this crate | the host |
 |---|---|
 | `Sec-WebSocket-Extensions` against the RFC 6455 §9.1 grammar | sockets, TLS, the async runtime |
-| choosing and committing an offer or a selection, both roles | framing, fragmentation, the RSV1 bit |
+| choosing and committing an offer or a selection, both roles | framing, fragmentation, and the RSV1 bit in both directions |
 | the negotiated windows and no-context-takeover behaviour | masking |
 | the DEFLATE compressor and inflater for one connection | message assembly and control-frame routing |
 | the RFC 7692 §7.2.1 trailer, on both sides | close codes and UTF-8 validation |
@@ -135,6 +135,23 @@ cancelled after an unknown number of octets cannot know what the peer received.
 small frame can ask for arbitrary memory, so a host whose plain-message setting is unbounded
 still supplies a finite ceiling here. It bounds the decompressed bytes of one message across
 all its fragments, and it is separate from whatever guard the host keeps on compressed input.
+
+The receiving side owes three things this crate cannot do for you, because it never sees a
+frame:
+
+- **Route on RSV1, and only on RSV1.** RFC 7692 §6.2 defines two receive algorithms, and the
+  bit on a message's first frame picks between them. A message that arrived with RSV1 clear
+  goes to the application as it is; passing it to `decompress` instead is the easiest wrong
+  call in this API, and the signature takes bytes and no bit, so nothing here can catch it.
+- **Fail the connection on RSV1 where the RFC forbids it.** RFC 7692 §6: "An endpoint MUST
+  NOT set the 'Per-Message Compressed' bit of control frames and non-first fragments of a
+  data message. An endpoint receiving such a frame MUST _Fail the WebSocket Connection_."
+- **Fail the connection on a reserved bit nothing defines.** RFC 6455 §5.2 requires it of any
+  nonzero RSV bit no negotiated extension gives a meaning to. `permessage-deflate` gives RSV1
+  a meaning once it has been agreed, and gives RSV2 and RSV3 none ever.
+
+Sending is the mirror of the first two: RSV1 on the first frame of a compressed message, and
+on nothing else.
 
 ## Backends
 

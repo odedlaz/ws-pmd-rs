@@ -298,6 +298,22 @@ impl Decoder {
     /// message; the limit is read fresh on every call, so a host that lowers its
     /// capacity mid-connection is obeyed from the next fragment onward rather
     /// than at whatever value negotiation happened to see.
+    ///
+    /// Only a message whose first frame carried RSV1 belongs here. RFC 7692
+    /// section 6.2 defines two receive algorithms and that bit picks between
+    /// them: a message that arrived with RSV1 clear goes to the application as
+    /// it is and never meets a decompressor. This signature takes bytes and no
+    /// bit, so it cannot tell a misrouted message from one that belongs.
+    ///
+    /// Two receive-side checks the host owes before it routes anything here,
+    /// both of them invisible from inside a crate with no frame type:
+    ///
+    /// * RSV1 on a control frame or on a non-first fragment. RFC 7692
+    ///   section 6: an endpoint receiving one MUST _Fail the WebSocket
+    ///   Connection_.
+    /// * RSV1 set with no negotiated extension defining it -- RFC 6455
+    ///   section 5.2, the same failure. This extension gives RSV1 a meaning
+    ///   only once it has been agreed, and gives RSV2 and RSV3 none ever.
     pub fn decompress(
         &mut self,
         input: &[u8],

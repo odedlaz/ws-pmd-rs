@@ -32,30 +32,13 @@ pub enum NegotiationError {
     #[error("permessage-deflate parameter has the wrong arity")]
     ParameterArity,
 
-    /// `permessage-deflate` appeared more than once inside a single response
-    /// field line. Repetition *across* field lines is
-    /// [`RepeatedResponseHeader`](Self::RepeatedResponseHeader), which is checked
-    /// first, so a response can only reach this variant on one line.
+    /// A response selected `permessage-deflate` more than once. RFC 6455 as
+    /// corrected by verified erratum EID 3433 lets a response split
+    /// `Sec-WebSocket-Extensions` across field lines, so the selections are
+    /// counted over the whole list: two on one line, and one on each of two
+    /// lines, both land here.
     #[error("permessage-deflate selected more than once")]
     DuplicateExtension,
-
-    /// The response carried more than one `Sec-WebSocket-Extensions` field line.
-    ///
-    /// RFC 6455 section 11.3.2 as published forbids that, but verified erratum
-    /// EID 3433 replaces the sentence with "The |Sec-WebSocket-Extensions|
-    /// header field MAY appear multiple times in an HTTP response", section
-    /// 4.2.2's own construction steps build a response split "between multiple
-    /// instances" of the field, and section 9.1 notes it "MAY be split or
-    /// combined across multiple lines". Rejecting the shape is therefore this
-    /// crate's choice and not the RFC's, and it fails a peer the corrected text
-    /// permits.
-    ///
-    /// Counted before the field is parsed, so this outranks both a grammar fault
-    /// on a repeated line and the shape carrying no `permessage-deflate` at all,
-    /// which would otherwise decline and hand the host an uncompressed
-    /// connection with no error.
-    #[error("Sec-WebSocket-Extensions appeared on more than one response field line")]
-    RepeatedResponseHeader,
 
     /// The client required `server_no_context_takeover` and the response did not
     /// confirm it.

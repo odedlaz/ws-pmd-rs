@@ -217,14 +217,19 @@ fn a_flag_parameter_may_not_carry_a_value() {
 /// the second. Two passes are what the RFC asks for, and this is the row that
 /// tells them apart.
 ///
-/// One line only. A response may not repeat the field at all, so the
-/// across-two-lines half of this property is now the server row below, where
-/// repetition stays legal.
+/// Both shapes, because a response may now split the field across lines: the
+/// two-pass property has to hold over the whole list and not only within the
+/// line that carries the selection.
 #[test]
 fn a_malformed_element_after_a_valid_selection_still_fails_the_field() {
-    let error = client_round_trip(ClientConfig::new(), &[b"permessage-deflate, x-other; tag=\xff"])
-        .expect_err("a selectable first element does not excuse the second");
-    assert_eq!(error, NegotiationError::MalformedHeader);
+    for response in [
+        &[b"permessage-deflate, x-other; tag=\xff" as &[u8]] as &[&[u8]],
+        &[b"permessage-deflate", b"x-other; tag=\xff"],
+    ] {
+        let error = client_round_trip(ClientConfig::new(), response)
+            .expect_err("a selectable first element does not excuse the second");
+        assert_eq!(error, NegotiationError::MalformedHeader);
+    }
 }
 
 #[test]
@@ -512,24 +517,32 @@ fn two_selections_are_rejected_across_one_line_and_across_two() {
             .expect_err("one selection only");
     assert_eq!(one_line, NegotiationError::DuplicateExtension);
 
-    // Across two lines the field count decides first, so `DuplicateExtension`
-    // is reachable in a response only within a single field line.
+    // The field-line count no longer decides anything, so this variant is the
+    // guard on both shapes: `sole_deflate` walks every line, and the second
+    // selection it finds fails the handshake wherever it sits. This row is what
+    // makes tolerating a split response safe rather than merely conforming.
     let two_lines =
         client_round_trip(ClientConfig::new(), &[b"permessage-deflate", b"permessage-deflate"])
-            .expect_err("a response carries one field line");
-    assert_eq!(two_lines, NegotiationError::RepeatedResponseHeader);
+            .expect_err("two selections are two selections however they are split");
+    assert_eq!(two_lines, NegotiationError::DuplicateExtension);
 }
 
-/// RFC 6455 section 11.3.2, and the response fails before a selection is sought.
+/// RFC 6455 section 4.2.2 item 6 builds a response split "between multiple
+/// instances" of the field, section 9.1 notes it "MAY be split or combined
+/// across multiple lines", and verified erratum EID 3433 strikes section
+/// 11.3.2's MUST NOT. A server naming another extension on one line and this one
+/// on the next is conforming, so the selection has to be found.
 #[test]
-fn a_selection_on_a_second_response_field_line_is_rejected() {
-    let error = client_round_trip(ClientConfig::new(), &[b"x-other", b"permessage-deflate"])
-        .expect_err("a response must carry one Sec-WebSocket-Extensions field");
-    assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+fn a_selection_on_a_second_response_field_line_is_accepted() {
+    let agreed = client_round_trip(ClientConfig::new(), &[b"x-other", b"permessage-deflate"])
+        .expect("a split response field is one list")
+        .expect("the server selected permessage-deflate on the second line");
+    assert_eq!(agreed.peer_max_window_bits(), 15);
 }
 
-/// The property the row above used to carry, kept on the side that still allows
-/// it: a request may repeat the field, so an offer on a later line is found.
+/// The request half of the row above. Both sides now read a split field as one
+/// list -- section 11.3.2's request clause was never in doubt -- so this is the
+/// control showing the request path did not move when the response path did.
 #[test]
 fn an_offer_on_a_later_request_field_line_is_still_selected() {
     let (response, agreed) =
@@ -946,18 +959,23 @@ fn composition_is_irrelevant_when_the_response_dropped_the_selection() {
 /// return. Without it the conflict check can widen to every count and still look
 /// correct: the removal row is decided by an earlier arm and cannot see it.
 ///
-/// One field line carrying two elements, because two field lines no longer reach
-/// this code -- the cardinality check answers them first.
+/// Both shapes reach this code now that the field-line count no longer answers
+/// them first, and what the loop counts is selections rather than lines.
 #[test]
 fn a_duplicated_response_outranks_a_composition_conflict() {
-    let handshake =
-        ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
-            .expect("the request is conforming")
-            .expect("selected");
-    let error = handshake
-        .finish(&headers(&[b"permessage-deflate, permessage-deflate"]), PmdComposition::Conflict)
-        .expect_err("both faults are present");
-    assert_eq!(error, NegotiationError::ResponseAltered);
+    for response in [
+        &[b"permessage-deflate, permessage-deflate" as &[u8]] as &[&[u8]],
+        &[b"permessage-deflate", b"permessage-deflate"],
+    ] {
+        let handshake =
+            ServerHandshake::accept(ServerConfig::new(), &headers(&[b"permessage-deflate"]))
+                .expect("the request is conforming")
+                .expect("selected");
+        let error = handshake
+            .finish(&headers(response), PmdComposition::Conflict)
+            .expect_err("both faults are present");
+        assert_eq!(error, NegotiationError::ResponseAltered);
+    }
 }
 
 /// A rewritten response is a host bug about the response, and a conflicting set
@@ -980,41 +998,58 @@ fn a_rewritten_response_outranks_a_composition_conflict() {
     assert_eq!(error, NegotiationError::ResponseAltered);
 }
 
-/// RFC 6455 section 11.3.2, every shape the count has to separate. The legal
-/// rows carry the discrimination: one field line stays legal however many
-/// elements it holds, so a check that counted elements rather than field lines
-/// fails here and nowhere else in this file.
+/// The ruling in one matrix: what decides a response is how many
+/// `permessage-deflate` selections it carries, not how many field lines carry
+/// them. Every split row here failed the handshake before, and the two that cost
+/// a conforming peer are the last selected row -- a selection sitting beside
+/// another extension on its own line, never read at all -- and the declined
+/// pair, where a plain decline was reported as an error.
 #[test]
-fn the_response_field_line_count_decides_before_any_selection() {
-    let mints: &[&[&[u8]]] = &[&[b"permessage-deflate"], &[b"x-other, permessage-deflate"]];
-    for response in mints {
+fn the_selection_count_decides_not_the_field_line_count() {
+    let selected: &[&[&[u8]]] = &[
+        &[b"permessage-deflate"],
+        &[b"x-other, permessage-deflate"],
+        &[b"x-other", b"permessage-deflate"],
+        &[b"permessage-deflate", b"x-other"],
+        &[b"x-a", b"permessage-deflate", b"x-b"],
+    ];
+    for response in selected {
         client_round_trip(ClientConfig::new(), response)
-            .expect("one field line is legal however many elements it carries")
+            .expect("one selection is legal however the field is split")
             .expect("the server selected permessage-deflate");
     }
 
-    let repeated: &[&[&[u8]]] = &[
-        &[b"x-other", b"permessage-deflate"],
-        &[b"permessage-deflate", b"x-other"],
+    let declined: &[&[&[u8]]] = &[&[b"x-other"], &[b"x-a", b"x-b"]];
+    for response in declined {
+        assert!(
+            client_round_trip(ClientConfig::new(), response)
+                .expect("a response naming only other extensions is well formed")
+                .is_none(),
+            "no selection is a clean decline and not an error"
+        );
+    }
+
+    let duplicated: &[&[&[u8]]] = &[
+        &[b"permessage-deflate, permessage-deflate"],
         &[b"permessage-deflate", b"permessage-deflate"],
-        &[b"x-a", b"permessage-deflate", b"x-b"],
-        &[b"x-a", b"x-b"],
+        &[b"permessage-deflate", b"x-other", b"permessage-deflate"],
     ];
-    for response in repeated {
+    for response in duplicated {
         let error = client_round_trip(ClientConfig::new(), response)
-            .expect_err("a repeated response field fails whatever the lines carry");
-        assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+            .expect_err("two selections fail wherever they sit");
+        assert_eq!(error, NegotiationError::DuplicateExtension);
     }
 }
 
-/// Cardinality outranks grammar: move the check below `grammar::validate` and
-/// the two repeated rows report `MalformedHeader` instead.
+/// `grammar::validate` runs over every field line before a selection is sought,
+/// so a fault is attributed to the grammar wherever it sits and the clean line
+/// does not rescue the field. Both cross-line rows reported the field-line count
+/// before that check was retired.
 ///
-/// The single-line row is the control, and what it holds is narrower than
-/// precedence -- a conforming field line keeps its ordinary grammar attribution,
-/// so the count cannot swallow `MalformedHeader`.
+/// The single-line row is the control: a conforming field keeps the same
+/// attribution, so the rows above are not reporting a shape.
 #[test]
-fn a_repeated_response_field_outranks_a_grammar_fault_on_it() {
+fn a_grammar_fault_on_any_response_field_line_is_reported() {
     let one_line = client_round_trip(ClientConfig::new(), &[b"permessage-deflate; ="])
         .expect_err("a malformed parameter on one line is a grammar fault");
     assert_eq!(one_line, NegotiationError::MalformedHeader);
@@ -1025,22 +1060,22 @@ fn a_repeated_response_field_outranks_a_grammar_fault_on_it() {
     ];
     for response in both_orders {
         let error = client_round_trip(ClientConfig::new(), response)
-            .expect_err("the field is both repeated and malformed");
-        assert_eq!(error, NegotiationError::RepeatedResponseHeader);
+            .expect_err("a fault on either line is a grammar fault");
+        assert_eq!(error, NegotiationError::MalformedHeader);
     }
 }
 
 /// `ServerHandshake::finish` reads a response the host is about to emit, so it
-/// owes the same three checks in the same order: field-line count, whole-field
-/// grammar, then correspondence with the proposal. `accept` keeps only the last
-/// two -- it reads a request, where a repeated field is legal.
+/// owes the same two checks in the same order as the client path: whole-field
+/// grammar, then correspondence with the proposal. Both read a field split across
+/// lines as one list, which is what `accept` has always done with a request.
 ///
 /// Grammar is the layer that was missing. Without it `ResponseAltered` stands in
 /// for parsing by accident of the byte comparison, so it fires only on a
 /// malformed `permessage-deflate` element and never on a malformed element under
 /// any other name.
 #[test]
-fn the_server_checks_count_then_grammar_then_correspondence() {
+fn the_server_checks_grammar_then_correspondence() {
     let request = headers(&[b"permessage-deflate"]);
     let finish = |response: &[&[u8]]| -> Result<Option<Negotiated>, NegotiationError> {
         let handshake = ServerHandshake::accept(ServerConfig::new(), &request)
@@ -1050,38 +1085,48 @@ fn the_server_checks_count_then_grammar_then_correspondence() {
         handshake.finish(&headers(response), PmdComposition::Compatible)
     };
 
-    for legal in [&[b"permessage-deflate" as &[u8]] as &[&[u8]], &[b"x-other, permessage-deflate"]]
-    {
+    for legal in [
+        &[b"permessage-deflate" as &[u8]] as &[&[u8]],
+        &[b"x-other, permessage-deflate"],
+        &[b"x-other", b"permessage-deflate"],
+        &[b"permessage-deflate", b"x-other"],
+        &[b"x-a", b"permessage-deflate", b"x-b"],
+    ] {
         assert!(
-            finish(legal).expect("one field line is legal").is_some(),
-            "the proposal is unaltered and the response carries one field"
+            finish(legal).expect("a split field is one list").is_some(),
+            "the proposal is unaltered however the response splits the field"
         );
     }
 
     // A parameter this crate knows only from PMD is ordinary grammar on an
     // unknown extension. Both paths agree here, which is what makes the
     // disagreements below discriminating rather than an artifact of the rig.
-    for declined in
-        [&[] as &[&[u8]], &[b"x-other" as &[u8]], &[b"x-other; server_max_window_bits=99"]]
-    {
+    for declined in [
+        &[] as &[&[u8]],
+        &[b"x-other" as &[u8]],
+        &[b"x-other; server_max_window_bits=99"],
+        &[b"x-a", b"x-b"],
+    ] {
         assert!(finish(declined).expect("a well-formed response with no PMD").is_none());
     }
 
-    for repeated in [
-        &[b"x-other" as &[u8], b"permessage-deflate"] as &[&[u8]],
-        &[b"permessage-deflate", b"x-other"],
-        &[b"permessage-deflate", b"permessage-deflate"],
-        &[b"x-a", b"permessage-deflate", b"x-b"],
-        &[b"x-a", b"x-b"],
-        &[b"x-other; =", b"permessage-deflate"],
+    for split_fault in [
+        &[b"x-other; =" as &[u8], b"permessage-deflate"] as &[&[u8]],
         &[b"permessage-deflate", b"x-other; ="],
     ] {
         assert_eq!(
-            finish(repeated).expect_err("a response carries one field line"),
-            NegotiationError::RepeatedResponseHeader,
-            "the count is read before the field is parsed, so it decides the last two rows too"
+            finish(split_fault).expect_err("the field does not parse"),
+            NegotiationError::MalformedHeader,
+            "grammar crosses field lines, so the clean line does not rescue the field"
         );
     }
+
+    assert_eq!(
+        finish(&[b"permessage-deflate", b"permessage-deflate"])
+            .expect_err("the host emitted two selections"),
+        NegotiationError::ResponseAltered,
+        "the loop counts selections, so a second one on another line is still altered"
+    );
 
     // Present-but-empty is one class with three members, and `""` is the one a
     // real host emits -- joining an extension list that turned out empty. It only

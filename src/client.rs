@@ -131,18 +131,19 @@ impl ClientHandshake {
     /// outcome and not an error. `composition` is only consulted once the server
     /// has actually selected `permessage-deflate`: a connection that ended up
     /// without it has nothing to compose.
+    ///
+    /// The response may carry `Sec-WebSocket-Extensions` on more than one field
+    /// line. RFC 6455 section 4.2.2 item 6 builds one that way, section 9.1 notes
+    /// the field "MAY be split or combined across multiple lines", and verified
+    /// erratum EID 3433 replaces section 11.3.2's MUST NOT with a MAY. Every line
+    /// is read as one list, so a second `permessage-deflate` selection anywhere in
+    /// it is a [`DuplicateExtension`](NegotiationError::DuplicateExtension) and a
+    /// response naming only other extensions is an ordinary decline.
     pub fn finish(
         self,
         headers: &HeaderMap,
         composition: PmdComposition,
     ) -> Result<Option<Negotiated>, NegotiationError> {
-        // Response-only, and so not in `grammar::validate`, which the server
-        // runs on a request, where RFC 6455 section 11.3.2 permits repetition
-        // outright. On a response that section's MUST NOT is struck by verified
-        // erratum EID 3433, so this rejection is crate policy, not the RFC's.
-        if headers.get_all(SEC_WEBSOCKET_EXTENSIONS).iter().nth(1).is_some() {
-            return Err(NegotiationError::RepeatedResponseHeader);
-        }
         grammar::validate(headers)?;
         let Some(params) = sole_deflate(headers)? else {
             return Ok(None);

@@ -88,14 +88,12 @@ impl ServerHandshake {
         headers: &HeaderMap,
         composition: PmdComposition,
     ) -> Result<Option<Negotiated>, NegotiationError> {
-        // Cardinality, then grammar, then correspondence. `accept` validates the
-        // request it reads; this reads a response, so without the middle step a
-        // malformed element under any name but `permessage-deflate` is never
-        // parsed and `ResponseAltered` stands in for grammar only by accident of
-        // the byte comparison below.
-        if headers.get_all(SEC_WEBSOCKET_EXTENSIONS).iter().nth(1).is_some() {
-            return Err(NegotiationError::RepeatedResponseHeader);
-        }
+        // Grammar, then correspondence. `accept` validates the request it reads;
+        // this reads a response, so without the first step a malformed element
+        // under any name but `permessage-deflate` is never parsed and
+        // `ResponseAltered` stands in for grammar only by accident of the byte
+        // comparison below. The host may split the field across lines, so both
+        // steps run over every line and the count below is of selections.
         grammar::validate(headers)?;
         let mut found = 0usize;
         for value in headers.get_all(SEC_WEBSOCKET_EXTENSIONS) {

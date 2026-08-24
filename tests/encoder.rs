@@ -427,6 +427,44 @@ fn reset_to_plain_discards_the_candidate_and_its_history() {
     }
 }
 
+/// A peer that kept its own history still decodes the message after a
+/// `reset_to_plain`.
+///
+/// This is the wire half of the argument `PreparedMessage::reset_to_plain`
+/// makes. Every other reset-to-plain row checks it with a fresh inflater, which
+/// proves the next message is self-contained but never puts a history-holding
+/// peer on the far end -- the position every real connection is in, because the
+/// abandoned candidate is precisely the message the peer never received.
+///
+/// The presence control runs first. If the payload did not compress against
+/// retained history, an encoder that never reset would emit the same bytes as
+/// one that did, and the row could not fail.
+#[test]
+fn a_history_keeping_peer_decodes_the_message_after_a_reset_to_plain() {
+    let sent = incompressible(4_000, 71);
+    let abandoned = incompressible(4_000, 73);
+
+    let mut control = takeover_encoder();
+    let standalone = send(&mut control, &abandoned).len();
+    let against_history = send(&mut control, &abandoned).len();
+    assert!(
+        against_history * 4 < standalone,
+        "the fixture must compress against retained history: {against_history} vs {standalone}"
+    );
+
+    let mut encoder = takeover_encoder();
+    let mut peer = Verifier::new();
+    let first = send(&mut encoder, &sent);
+    assert_eq!(peer.accept(&first).expect("first"), sent);
+
+    // The peer never sees these bytes, so its window does not move -- and an
+    // encoder that kept them would compress the next message against them.
+    encoder.prepare_message(&abandoned).expect("prepared").reset_to_plain();
+
+    let next = send(&mut encoder, &abandoned);
+    assert_eq!(peer.accept(&next).expect("valid stream"), abandoned);
+}
+
 /// An unresolved candidate poisons the direction, however it went unresolved.
 #[test]
 fn an_unresolved_candidate_poisons_the_encoder() {

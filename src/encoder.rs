@@ -1,0 +1,552 @@
+//! The compressor for one connection, in one direction, and the transaction
+//! that decides whether its output reached the wire.
+//!
+//! RFC 7692 section 7.2.1 defines the producer side as three steps over a
+//! *complete* message: deflate it, end it with an empty uncompressed block, then
+//! remove that block's four trailing octets. The same section says an endpoint
+//! "fragments a compressed message by splitting the result of running this
+//! algorithm", so a complete-message encoder is the conforming shape and the
+//! host owns framing. The adjacent MUST NOT -- that `00 00 ff ff` is not removed
+//! from non-final fragments -- governs the other strategy, where a host calls an
+//! encoder once per fragment. Nothing here can enter it.
+//!
+//! Compression history is the peer's problem as much as ours, so a candidate
+//! that may not reach the wire cannot be produced and forgotten. Preparing a
+//! message moves the compressor *out* of the encoder and into the returned
+//! guard; only committing it or falling back to plain puts it back. Every other
+//! outcome -- an error, a dropped guard, a cancelled write, even a leaked guard
+//! -- leaves the encoder vacant, and vacant is poisoned.
+
+use flate2::{Compress, FlushCompress, Status};
+
+use crate::codec::{advance, TRAILER};
+use crate::config::EncoderConfig;
+use crate::error::CodecError;
+use crate::negotiated::Negotiated;
+
+/// Output taken from the backend per call, and the stack one message costs while
+/// it is being produced.
+///
+/// One hard constraint: at least six, and the boundary is exact rather than
+/// cautious. `sync_flush` reads "the call left output room" as "the flush is
+/// complete", and the flush that ends every message emits a five-octet empty
+/// stored block -- so a buffer of exactly five returns with no room left, zlib
+/// re-arms the flush as incomplete, and the next call emits another whole block.
+/// Measured on both locked backends: 1 through 5 never terminate, 6 and above
+/// round-trip every payload.
+///
+/// Everything above six trades backend round trips against stack, and
+/// correctness does not depend on where in that range this sits. It matches the
+/// decoder's, so one message costs the same either way through the codec.
+const SCRATCH: usize = 4096;
+
+/// The floor above is load-bearing and its failure mode is a hang rather than an
+/// error, so it is enforced where it cannot be edited past.
+const _: () = assert!(SCRATCH >= 6, "a scratch buffer below six never completes a sync flush");
+
+/// The narrowest window `flate2` will build a compressor for.
+///
+/// `Compress::new_with_window_bits` asserts `9 ..= 15` in flate2's own frontend,
+/// before any backend sees the value. RFC 7692 admits 8 on the wire, and both
+/// handshake paths refuse to agree to a local 8 rather than clamping it, so this
+/// floor is a negotiated precondition here and not a decision.
+const MIN_COMPRESSOR_WINDOW_BITS: u8 = 9;
+
+/// The widest window DEFLATE defines.
+const MAX_COMPRESSOR_WINDOW_BITS: u8 = 15;
+
+/// RFC 7692 section 7.2.3.6's payload for a message that compresses to nothing:
+/// one empty uncompressed DEFLATE block with `BFINAL` unset, `BTYPE` 00, and
+/// five padding bits.
+const EMPTY_MESSAGE: &[u8] = &[0x00];
+
+/// Everything the compressor is built from.
+///
+/// Unlike the inflater's, this is not kept: `Compress::reset` takes no argument
+/// and preserves both level and window on each locked backend, so there is no
+/// route that has to rebuild from what it stored. It exists to name the mapping
+/// from an agreement to flate2's arguments in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompressorConfig {
+    level: u32,
+    window_bits: u8,
+}
+
+impl CompressorConfig {
+    /// The local direction of an agreement. Never the peer accessors: the peer's
+    /// window and takeover setting describe the inflater, and a swap here would
+    /// compress to a width this side never agreed to hold.
+    fn for_local(negotiated: &Negotiated, config: EncoderConfig) -> Self {
+        Self { level: config.level(), window_bits: negotiated.local_max_window_bits() }
+    }
+
+    /// The only place this crate constructs a compressor.
+    fn build(self) -> Compress {
+        // flate2 panics below 9. Both handshake paths reject a local 8 where it
+        // is configured -- `ClientWindowTooNarrow` and a declined offer -- so
+        // this states the invariant at the boundary that depends on it rather
+        // than letting a future route reach flate2's assert instead.
+        // `every_agreement_builds_a_compressor_in_range` exhausts both paths.
+        #[expect(
+            clippy::panic,
+            clippy::manual_assert,
+            reason = "a negotiated local width below 9 is a crate defect, pinned by `every_agreement_builds_a_compressor_in_range`; \
+                      written as a panic so `panic = \"deny\"` keeps accounting for the site, which it would not for an `assert!`"
+        )]
+        if !(MIN_COMPRESSOR_WINDOW_BITS..=MAX_COMPRESSOR_WINDOW_BITS).contains(&self.window_bits) {
+            panic!("negotiation admitted a local window of {} bits", self.window_bits);
+        }
+        Compress::new_with_window_bits(
+            flate2::Compression::new(self.level),
+            // PMD carries raw DEFLATE. A zlib header would be two octets the
+            // peer's inflater reads as compressed data.
+            false,
+            self.window_bits,
+        )
+    }
+}
+
+/// The compressor for one connection, in one direction.
+///
+/// Holds this side's compression history between messages, and holds it only
+/// while no candidate is outstanding. A vacant encoder is a poisoned one: see
+/// [`Encoder::prepare_message`].
+#[derive(Debug)]
+pub struct Encoder {
+    /// `None` means a candidate is outstanding, or one was never resolved. The
+    /// distinction does not matter to a caller, because the borrow makes the
+    /// first case unobservable and the second is terminal.
+    compressor: Option<Compress>,
+    reset_between_messages: bool,
+}
+
+impl Encoder {
+    pub(crate) fn for_agreement(negotiated: &Negotiated, config: EncoderConfig) -> Self {
+        Self {
+            compressor: Some(CompressorConfig::for_local(negotiated, config).build()),
+            reset_between_messages: negotiated.local_no_context_takeover(),
+        }
+    }
+
+    /// Compress one complete message, without deciding that it will be sent.
+    ///
+    /// The returned guard holds both the candidate bytes and the compressor that
+    /// produced them. Until it resolves, this encoder has no compressor, so the
+    /// history that candidate advanced cannot be built on and cannot be
+    /// abandoned by accident:
+    ///
+    /// * [`commit`](PreparedMessage::commit) says the bytes will reach the peer,
+    ///   and returns the advanced history.
+    /// * [`reset_to_plain`](PreparedMessage::reset_to_plain) says they will not,
+    ///   and returns an empty one.
+    /// * Anything else -- a dropped guard, an unknown partial write, a
+    ///   `mem::forget` -- leaves the encoder vacant, and every later call
+    ///   returns [`CodecError::Poisoned`] before a backend is touched.
+    ///
+    /// That last case is the point. A host whose write was cancelled after an
+    /// unknown number of octets cannot know what the peer received, and resuming
+    /// from history the peer may not hold decodes every later message to
+    /// nonsense. Failing the connection is the only answer that does not depend
+    /// on knowing.
+    pub fn prepare_message(&mut self, payload: &[u8]) -> Result<PreparedMessage<'_>, CodecError> {
+        let mut compressor = self.compressor.take().ok_or(CodecError::Poisoned)?;
+        // On the error path `compressor` is dropped here, which is what makes a
+        // prepare failure terminal without a flag to keep in step.
+        let bytes = produce(&mut compressor, payload)?;
+        Ok(PreparedMessage { encoder: self, compressor, bytes })
+    }
+}
+
+/// A compressed message that has not yet been declared sent or discarded.
+///
+/// Deliberately has no `Drop` impl. Dropping it must poison the encoder, and the
+/// way to guarantee that without depending on `Drop` running is for the
+/// compressor to live *in* here: safe `std::mem::forget` leaks the guard, which
+/// leaks the compressor, and the encoder stays vacant either way.
+#[must_use = "an unresolved prepared message poisons the encoder"]
+#[derive(Debug)]
+pub struct PreparedMessage<'a> {
+    encoder: &'a mut Encoder,
+    compressor: Compress,
+    bytes: Vec<u8>,
+}
+
+impl PreparedMessage<'_> {
+    /// The candidate payload: RFC 7692 section 7.2.1 applied to the whole
+    /// message, with the four-octet trailer already removed.
+    ///
+    /// A host may frame these bytes in any legal fragment sequence, setting RSV1
+    /// on the first frame only.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The candidate payload, mutably, for a reversible transport transform such
+    /// as client masking.
+    ///
+    /// Not a general post-compression seam: anything that changes what the peer
+    /// inflates changes what this side's history claims it sent.
+    #[must_use]
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    /// Declare that these bytes will appear on the wire, and take them.
+    ///
+    /// A host that queues rather than writes calls this only once insertion can
+    /// no longer fail; a host that writes directly reads
+    /// [`as_bytes`](Self::as_bytes), writes all of it, then commits.
+    #[must_use]
+    pub fn commit(self) -> Vec<u8> {
+        let Self { encoder, mut compressor, bytes } = self;
+        if encoder.reset_between_messages {
+            reset(&mut compressor);
+        }
+        encoder.compressor = Some(compressor);
+        bytes
+    }
+
+    /// Declare that none of these bytes will appear on the wire.
+    ///
+    /// The history the candidate advanced is dropped, so the next compressed
+    /// message starts from an empty window. That may cost compression the peer
+    /// would have honoured, and it is the only wire-safe answer: the peer's
+    /// retained history is then a superset of ours, and a stream that never
+    /// references it cannot be decoded wrongly by holding it.
+    ///
+    /// The host still has its original payload and sends it with RSV1 clear.
+    pub fn reset_to_plain(self) {
+        let Self { encoder, mut compressor, .. } = self;
+        reset(&mut compressor);
+        encoder.compressor = Some(compressor);
+    }
+}
+
+/// Start this side's compression history over.
+///
+/// `Compress::reset` is the whole operation at every negotiated width, which is
+/// what makes this the encoder's only reinitialisation route. It takes no
+/// arguments and both locked backends keep the level and the window across it --
+/// the C route calls `deflateReset`, which zlib documents as preserving the
+/// compression level and other attributes, and zlib-rs reinitialises the LZ
+/// state while retaining the stream configuration. The inflater's
+/// rebuild-below-15 branch exists because `Decompress::reset` *does* discard a
+/// narrower window; copying it here would allocate to preserve nothing.
+fn reset(compressor: &mut Compress) {
+    compressor.reset();
+}
+
+/// RFC 7692 section 7.2.1 steps 1 through 3, for one complete message.
+fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut output = Vec::new();
+    let mut scratch = [0u8; SCRATCH];
+    feed(compressor, payload, &mut scratch, &mut output)?;
+    sync_flush(compressor, &mut scratch, &mut output)?;
+    strip_or_synthesize(payload, output)
+}
+
+/// Step 1: the whole payload into raw DEFLATE, holding nothing back.
+fn feed(
+    compressor: &mut Compress,
+    payload: &[u8],
+    scratch: &mut [u8; SCRATCH],
+    output: &mut Vec<u8>,
+) -> Result<(), CodecError> {
+    let mut input = payload;
+    while !input.is_empty() {
+        let step = drive(compressor, input, scratch, FlushCompress::None)?;
+        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
+        output.extend_from_slice(&scratch[..step.produced]);
+        // Keyed on the residual, not on the status: `Ok` is a conforming answer
+        // for a call with nowhere left to put output, so reading termination off
+        // the status would drop a tail in silence.
+        if step.consumed == 0 && step.produced == 0 {
+            return Err(CodecError::Stalled);
+        }
+        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
+        {
+            input = &input[step.consumed..];
+        }
+    }
+    Ok(())
+}
+
+/// Step 2: end the message with an empty uncompressed block.
+///
+/// `Z_SYNC_FLUSH` completes the current block, pads to a byte boundary, and
+/// appends that empty block -- which is what leaves `00 00 ff ff` for step 3 to
+/// take. RFC 7692 section 7.3 names it as the ordinary mechanism, and `Finish`
+/// is never used: it would end the DEFLATE stream and forfeit the history the
+/// next message may reference.
+///
+/// The flush has to be repeated while the buffer keeps filling, because zlib
+/// only marks a flush complete once a call returns with output room left. The
+/// loop terminates because a flush's output is bounded by the message's own
+/// compressed size, and every continuing round takes a whole `SCRATCH` of it.
+fn sync_flush(
+    compressor: &mut Compress,
+    scratch: &mut [u8; SCRATCH],
+    output: &mut Vec<u8>,
+) -> Result<(), CodecError> {
+    loop {
+        let step = drive(compressor, &[], scratch, FlushCompress::Sync)?;
+        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
+        output.extend_from_slice(&scratch[..step.produced]);
+        if step.produced < scratch.len() {
+            return Ok(());
+        }
+    }
+}
+
+/// Step 3: remove the four octets the peer's decoder is required to feed back.
+///
+/// Exactly the tail, never a backward scan: `00 00 ff ff` occurs inside ordinary
+/// compressed data, and section 7.2.3.5 shows a conforming message where it
+/// appears mid-payload between two DEFLATE blocks.
+///
+/// A message that produced no bytes at all is the one case where the tail is
+/// legitimately absent. Both locked backends refuse a redundant flush -- zlib
+/// returns `Z_BUF_ERROR` when there is no input and the requested flush does not
+/// outrank the last one -- so an empty message that directly follows another
+/// message under context takeover yields nothing to strip. Section 7.2.3.6
+/// answers exactly this: "If the compression library being used doesn't generate
+/// any data when its buffer is empty, an empty uncompressed DEFLATE block can be
+/// built and used for this purpose". That block is [`EMPTY_MESSAGE`], and it is
+/// byte-identical to what a fresh compressor emits for the same message.
+///
+/// The condition is the backend's observable output and not
+/// `local_no_context_takeover`, so the arm stays correct on a backend that
+/// declines a fresh empty flush too. No bytes for a payload that *had* bytes is
+/// a fault either way.
+fn strip_or_synthesize(payload: &[u8], mut output: Vec<u8>) -> Result<Vec<u8>, CodecError> {
+    if output.ends_with(TRAILER) {
+        output.truncate(output.len().saturating_sub(TRAILER.len()));
+        Ok(output)
+    } else if payload.is_empty() && output.is_empty() {
+        Ok(EMPTY_MESSAGE.to_vec())
+    } else {
+        Err(CodecError::CompressionFailed)
+    }
+}
+
+/// What one backend call moved, read off the slices that call was handed.
+struct Step {
+    consumed: usize,
+    produced: usize,
+}
+
+/// Drive the compressor once.
+///
+/// `StreamEnd` is a fault rather than termination: nothing here asks for
+/// `Finish`, so a backend reporting a finished stream has ended one this side
+/// still owes messages on.
+fn drive(
+    compressor: &mut Compress,
+    input: &[u8],
+    scratch: &mut [u8],
+    flush: FlushCompress,
+) -> Result<Step, CodecError> {
+    let before = (compressor.total_in(), compressor.total_out());
+    let status =
+        compressor.compress(input, scratch, flush).map_err(|_| CodecError::CompressionFailed)?;
+    if status == Status::StreamEnd {
+        return Err(CodecError::CompressionFailed);
+    }
+    Ok(Step {
+        consumed: advance(before.0, compressor.total_in(), input.len()),
+        produced: advance(before.1, compressor.total_out(), scratch.len()),
+    })
+}
+
+#[cfg(test)]
+#[expect(clippy::expect_used, clippy::panic, reason = "a panic is how a test reports")]
+mod tests {
+    use super::{
+        CompressorConfig, EMPTY_MESSAGE, MAX_COMPRESSOR_WINDOW_BITS, MIN_COMPRESSOR_WINDOW_BITS,
+    };
+    use crate::config::{ClientConfig, EncoderConfig, ServerConfig};
+    use crate::negotiated::{Negotiated, PmdComposition, Role};
+    use crate::{ClientOffer, ServerHandshake};
+    use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+
+    /// RFC 7692 section 7.2.3.6's octet is the one this crate synthesizes.
+    #[test]
+    fn the_synthesized_empty_message_is_the_rfc_octet() {
+        assert_eq!(EMPTY_MESSAGE, &[0x00]);
+    }
+
+    /// The local direction of the agreement, for every width both roles can
+    /// negotiate, read off a real agreement rather than a helper beside one.
+    ///
+    /// Both roles, because `local_max_window_bits` reads the opposite stored
+    /// field in each: with one role the two fields would only have to agree.
+    /// The peer field is deliberately set to a different value so a swap shows.
+    ///
+    /// This is a mapping seam and not a claim about the arguments `flate2`
+    /// receives -- `Compress` exposes no read-back, so a literal substituted
+    /// inside `build` still passes this row. What guards those substitutions is
+    /// behavioural and lives in `tests/encoder.rs`: unlike the inflater's, the
+    /// compressor's declared window is observable in the output size on *both*
+    /// backends, so `the_local_window_bounds_back_references` kills them there.
+    #[test]
+    fn the_compressor_maps_the_local_direction_for_both_roles() {
+        for local in MIN_COMPRESSOR_WINDOW_BITS..=MAX_COMPRESSOR_WINDOW_BITS {
+            let peer = MAX_COMPRESSOR_WINDOW_BITS - (local - MIN_COMPRESSOR_WINDOW_BITS);
+            let expected =
+                CompressorConfig { level: EncoderConfig::new().level(), window_bits: local };
+
+            // Role::Client reads client_max_window_bits as local.
+            let client = Negotiated::new(Role::Client, false, false, peer, local);
+            assert_eq!(
+                CompressorConfig::for_local(&client, EncoderConfig::new()),
+                expected,
+                "client, local {local}"
+            );
+
+            let server = Negotiated::new(Role::Server, false, false, local, peer);
+            assert_eq!(
+                CompressorConfig::for_local(&server, EncoderConfig::new()),
+                expected,
+                "server, local {local}"
+            );
+        }
+    }
+
+    /// The takeover flag the encoder resets on, read off the real `Encoder` both
+    /// roles build, with the peer's value set opposite so a swap shows.
+    #[test]
+    fn the_encoder_resets_on_the_local_takeover_flag_for_both_roles() {
+        for local in [false, true] {
+            let client = Negotiated::new(Role::Client, !local, local, 15, 15);
+            let (encoder, _) = client.into_codecs(EncoderConfig::new());
+            assert_eq!(encoder.reset_between_messages, local, "client, local {local}");
+
+            let server = Negotiated::new(Role::Server, local, !local, 15, 15);
+            let (encoder, _) = server.into_codecs(EncoderConfig::new());
+            assert_eq!(encoder.reset_between_messages, local, "server, local {local}");
+        }
+    }
+
+    /// Every agreement the two handshake paths can mint builds a compressor in
+    /// flate2's range, so the panic in `build` is unreachable from public input.
+    ///
+    /// Exhausts the wire's whole width space, 8 through 15, on both sides of
+    /// both roles -- 8 included, because that is the value flate2 would panic on
+    /// and the one both paths are supposed to refuse.
+    #[test]
+    fn every_agreement_builds_a_compressor_in_range() {
+        let mut minted = 0usize;
+        let mut refused = 0usize;
+        for local in 8..=15u8 {
+            for peer in 8..=15u8 {
+                for takeover in [false, true] {
+                    for agreement in client_agreements(local, peer, takeover)
+                        .into_iter()
+                        .chain(server_agreements(local, peer, takeover))
+                    {
+                        match agreement {
+                            Ok(negotiated) => {
+                                let bits = negotiated.local_max_window_bits();
+                                assert!(
+                                    (MIN_COMPRESSOR_WINDOW_BITS..=MAX_COMPRESSOR_WINDOW_BITS)
+                                        .contains(&bits),
+                                    "an agreement minted local {bits} from local {local}, peer {peer}"
+                                );
+                                // Not just the accessor: the real constructor.
+                                let _ = negotiated.into_codecs(EncoderConfig::new());
+                                minted += 1;
+                            }
+                            Err(()) => refused += 1,
+                        }
+                    }
+                }
+            }
+        }
+        assert!(minted > 0, "the sweep minted no agreements, so it asserted nothing");
+        assert!(
+            refused > 0,
+            "no width was refused, so the sweep never exercised the 8 both paths reject"
+        );
+    }
+
+    /// Client agreements for a local (client) and peer (server) width, one per
+    /// response shape a server could legally send for that pair.
+    fn client_agreements(local: u8, peer: u8, takeover: bool) -> Vec<Result<Negotiated, ()>> {
+        let Ok(config) = ClientConfig::new()
+            .client_no_context_takeover(takeover)
+            .client_max_window_bits(local)
+            .and_then(|c| c.server_max_window_bits(peer))
+        else {
+            // A local 8 is refused where it is configured, which is the point.
+            return vec![Err(())];
+        };
+        let mut request = HeaderMap::new();
+        let offer = ClientOffer::install(config, &mut request).expect("fresh map");
+        let sealed = offer.seal(&request).expect("the offer is unchanged");
+        let response = format!(
+            "permessage-deflate{}; server_max_window_bits={peer}; client_max_window_bits={local}",
+            if takeover { "; client_no_context_takeover" } else { "" }
+        );
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SEC_WEBSOCKET_EXTENSIONS,
+            HeaderValue::from_str(&response).expect("a valid header value"),
+        );
+        vec![sealed
+            .finish(&headers, PmdComposition::Compatible)
+            .map_or(Err(()), |selected| selected.ok_or(()).map_err(|()| unreachable_decline()))]
+    }
+
+    /// Server agreements for a local (server) and peer (client) width.
+    fn server_agreements(local: u8, peer: u8, takeover: bool) -> Vec<Result<Negotiated, ()>> {
+        let Ok(config) = ServerConfig::new()
+            .server_no_context_takeover(takeover)
+            .server_max_window_bits(local)
+            .and_then(|c| c.client_max_window_bits(peer))
+        else {
+            return vec![Err(())];
+        };
+        let mut request = HeaderMap::new();
+        request.append(
+            SEC_WEBSOCKET_EXTENSIONS,
+            HeaderValue::from_static("permessage-deflate; client_max_window_bits"),
+        );
+        let Ok(Some(handshake)) = ServerHandshake::accept(config, &request) else {
+            return vec![Err(())];
+        };
+        let mut response = HeaderMap::new();
+        response.append(SEC_WEBSOCKET_EXTENSIONS, handshake.value().clone());
+        vec![handshake
+            .finish(&response, PmdComposition::Compatible)
+            .map_or(Err(()), |selected| selected.ok_or(()))]
+    }
+
+    /// A server that echoed its own proposal cannot decline it, so this arm
+    /// reports a crate defect rather than a case the sweep should tolerate.
+    fn unreachable_decline() -> ! {
+        panic!("a response carrying the crate's own selection declined it");
+    }
+
+    /// A level outside zlib's domain is refused before any codec exists, and the
+    /// backend's own default -- which `EncoderConfig::new` reads rather than
+    /// restates -- is inside the range that refusal enforces.
+    #[test]
+    fn a_level_outside_the_domain_is_refused_at_configuration() {
+        for level in [10u32, 11, 255, u32::MAX] {
+            assert!(EncoderConfig::new().compression_level(level).is_err(), "level {level}");
+        }
+        for level in 0..=9u32 {
+            let config =
+                EncoderConfig::new().compression_level(level).expect("zlib's whole domain");
+            assert_eq!(config.level(), level);
+        }
+        // `u32` has no values below the floor, so only the ceiling can be
+        // crossed; the type carries the other half of the range check.
+        let default = EncoderConfig::new().level();
+        assert!(
+            EncoderConfig::new().compression_level(default).is_ok(),
+            "the backend's default level {default} is outside the domain this crate accepts"
+        );
+    }
+}

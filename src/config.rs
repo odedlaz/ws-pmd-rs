@@ -20,6 +20,11 @@ const MIN_LOCAL_WINDOW_BITS: u8 = 9;
 /// The narrowest window that may appear on the wire.
 const MIN_WIRE_WINDOW_BITS: u8 = 8;
 
+/// The coarsest compression zlib defines: 0 stores, 9 is the slowest and
+/// smallest. flate2 forwards the value unchanged, so a level outside the domain
+/// is refused here rather than at a backend.
+const MAX_COMPRESSION_LEVEL: u32 = 9;
+
 fn check_local(bits: u8) -> Result<u8, ConfigError> {
     if (MIN_LOCAL_WINDOW_BITS..=MAX_WINDOW_BITS).contains(&bits) {
         Ok(bits)
@@ -184,5 +189,46 @@ impl ServerConfig {
 
     pub(crate) const fn supported_client_max_window_bits(self) -> u8 {
         self.client_max_window_bits
+    }
+}
+
+/// What this side's compressor is built with, beyond the agreement.
+///
+/// One setting, and it is not negotiated: RFC 7692 gives the level no wire
+/// representation, so it is local policy that costs the peer nothing to decode.
+/// Both roles share this type for the same reason -- unlike the window
+/// parameters, a level names no side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderConfig {
+    level: u32,
+}
+
+impl Default for EncoderConfig {
+    /// The backend's own default, read from it rather than restated here.
+    /// `the_default_level_is_inside_the_domain` pins it against
+    /// [`EncoderConfig::compression_level`]'s range.
+    fn default() -> Self {
+        Self { level: flate2::Compression::default().level() }
+    }
+}
+
+impl EncoderConfig {
+    /// A compressor at the backend's default level.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Choose the compression level, 0 through 9.
+    pub fn compression_level(mut self, level: u32) -> Result<Self, ConfigError> {
+        if level > MAX_COMPRESSION_LEVEL {
+            return Err(ConfigError::CompressionLevel);
+        }
+        self.level = level;
+        Ok(self)
+    }
+
+    pub(crate) const fn level(self) -> u32 {
+        self.level
     }
 }

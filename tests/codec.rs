@@ -14,7 +14,8 @@
 use flate2::{Compress, Compression, FlushCompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
-    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, PmdComposition,
+    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, EncoderConfig,
+    PmdComposition,
 };
 
 /// RFC 7692 section 7.2.1: every compressed message has this stripped from its
@@ -40,7 +41,8 @@ fn decoder_for(response: &[u8]) -> Decoder {
         .finish(&headers, PmdComposition::Compatible)
         .expect("the response is legal")
         .expect("the server selected it")
-        .into_decoder()
+        .into_codecs(EncoderConfig::new())
+        .1
 }
 
 fn plain_decoder() -> Decoder {

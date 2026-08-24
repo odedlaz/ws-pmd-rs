@@ -44,7 +44,7 @@ pub enum PmdComposition {
 /// Holds settings, not compression state, and allocates nothing. It is
 /// deliberately neither `Copy` nor `Clone`: codecs are built by consuming it,
 /// and that is only a gate if the value cannot be spent twice. A `Copy`
-/// agreement made double-minting invisible -- `n.into_decoder()` twice
+/// agreement made double-minting invisible -- `n.into_codecs(c)` twice
 /// compiled, with no syntactic marker that anything unusual had happened.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Negotiated {

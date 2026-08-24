@@ -11,11 +11,13 @@
 
 use flate2::{Decompress, FlushDecompress, Status};
 
+use crate::config::EncoderConfig;
+use crate::encoder::Encoder;
 use crate::error::CodecError;
 use crate::negotiated::Negotiated;
 
 /// The trailer RFC 7692 section 7.2.1 strips from every compressed message.
-const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
+pub const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
 
 /// Output taken from the backend per call, and the stack this decoder costs
 /// while one is in flight.
@@ -171,16 +173,43 @@ pub struct Decoder {
 }
 
 impl Negotiated {
-    /// Build the inflater this agreement describes.
+    /// Build the codec pair this agreement describes.
     ///
     /// The first point that allocates zlib state, and the only way to reach it:
     /// there is no constructor that turns local configuration into a live codec.
     /// It consumes the agreement, and [`Negotiated`] is neither `Copy` nor
-    /// `Clone`, so one agreement mints one codec.
+    /// `Clone`, so one agreement mints one pair.
+    ///
+    /// The halves come back separate rather than joined because that is the
+    /// shape a host needs: each direction moves into the task that owns it, and
+    /// a read that decodes never waits on a write that compresses. Both are
+    /// `Send`, which `gate-public-compile` asserts statically from outside the
+    /// package.
     ///
     /// ```
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
+    /// #     .expect("the server selected it");
+    /// let (encoder, decoder) = agreed.into_codecs(EncoderConfig::new());
+    /// # Ok::<(), permessage_deflate::NegotiationError>(())
+    /// ```
+    ///
+    /// There is one terminal constructor, not two. A receive-only host drops the
+    /// encoder and pays one compressor's allocation for it; a second method that
+    /// minted a decoder alone would let the same agreement resolve two different
+    /// ways, which is the property the linear type exists to remove.
+    ///
+    /// ```compile_fail,E0599
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -194,12 +223,19 @@ impl Negotiated {
     /// # Ok::<(), permessage_deflate::NegotiationError>(())
     /// ```
     ///
-    /// Spending the same agreement twice does not compile. The example above is
-    /// the control for this one: they differ by exactly the second call.
+    /// Spending the same agreement twice does not compile. The passing example
+    /// is the control for both of these: it differs from the first by only the
+    /// method name, and from this one by only the second call.
     ///
-    /// ```compile_fail
+    /// The pinned codes are checked on nightly and ignored on stable, where any
+    /// compilation failure satisfies a bare `compile_fail`. What rules out an
+    /// unrelated break there is that control: the preamble is byte-identical in
+    /// all three snippets, so a setup that stopped compiling turns the passing
+    /// one red instead of quietly satisfying these two.
+    ///
+    /// ```compile_fail,E0382
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -209,21 +245,23 @@ impl Negotiated {
     /// # );
     /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
     /// #     .expect("the server selected it");
-    /// let decoder = agreed.into_decoder();
-    /// let another = agreed.into_decoder();
+    /// let (encoder, decoder) = agreed.into_codecs(EncoderConfig::new());
+    /// let (again, and_again) = agreed.into_codecs(EncoderConfig::new());
     /// # Ok::<(), permessage_deflate::NegotiationError>(())
     /// ```
     #[must_use]
-    pub fn into_decoder(self) -> Decoder {
-        let config = InflaterConfig::for_peer_window(self.peer_max_window_bits());
-        Decoder {
-            config,
-            inflater: config.build(),
+    pub fn into_codecs(self, config: EncoderConfig) -> (Encoder, Decoder) {
+        let encoder = Encoder::for_agreement(&self, config);
+        let inflater = InflaterConfig::for_peer_window(self.peer_max_window_bits());
+        let decoder = Decoder {
+            config: inflater,
+            inflater: inflater.build(),
             reset_between_messages: self.peer_no_context_takeover(),
             stream_open: false,
             delivered: 0,
             poisoned: false,
-        }
+        };
+        (encoder, decoder)
     }
 }
 
@@ -383,7 +421,7 @@ struct Step<'a> {
 /// One backend call moves its `total_*` counter by at most the length of the
 /// buffer it was handed, so clamping the `u64` delta to that length is exact
 /// rather than lossy — and it keeps a fallible cast out of the hot loop.
-fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
+pub fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
     usize::try_from(after.saturating_sub(before)).unwrap_or(buffer_len).min(buffer_len)
 }
 
@@ -434,6 +472,7 @@ mod tests {
     use super::{
         advance, step, CodecError, Decompress, InflaterConfig, DEFAULT_INFLATER_WINDOW_BITS,
     };
+    use crate::config::EncoderConfig;
     use crate::negotiated::{Negotiated, Role};
 
     /// A raw DEFLATE stream ending in BFINAL, from an independent compressor.
@@ -640,18 +679,23 @@ mod tests {
     /// guarded there.
     #[test]
     fn the_inflater_is_built_at_the_negotiated_peer_width_for_both_roles() {
+        let config = EncoderConfig::new();
         for peer in 8..=15u8 {
             let expected = InflaterConfig {
                 zlib_header: false,
                 window_bits: if peer == 8 { 9 } else { peer },
             };
-            // Role::Client reads server_max_window_bits as the peer's; the
-            // local field is set to a different value so a swap shows up.
-            let client = Negotiated::new(Role::Client, false, false, peer, 15 - (peer - 8));
-            assert_eq!(client.into_decoder().config, expected, "client, peer {peer}");
+            // The local field is set to a width this inflater must not be built
+            // at, so reading the wrong one shows up. It stays inside 9..=15
+            // because `into_codecs` builds the compressor from it too, and a
+            // local 8 is a width no handshake path can agree to.
+            let local = if expected.window_bits == 15 { 9 } else { 15 };
+            // Role::Client reads server_max_window_bits as the peer's.
+            let client = Negotiated::new(Role::Client, false, false, peer, local);
+            assert_eq!(client.into_codecs(config).1.config, expected, "client, peer {peer}");
 
-            let server = Negotiated::new(Role::Server, false, false, 15 - (peer - 8), peer);
-            assert_eq!(server.into_decoder().config, expected, "server, peer {peer}");
+            let server = Negotiated::new(Role::Server, false, false, local, peer);
+            assert_eq!(server.into_codecs(config).1.config, expected, "server, peer {peer}");
         }
     }
 

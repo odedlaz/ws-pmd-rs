@@ -83,9 +83,10 @@ missing_errors_doc = "allow"
 # are not written yet.
 missing_const_for_fn = "allow"
 
-# Nothing in production may panic, index, or exit out of band. The four sites
-# that would are each `#[expect]`-ed at the site with the invariant named and a
-# test pinning it, so the allowance goes red if the invariant stops holding.
+# Nothing in production may panic, index, or exit out of band. Every site that
+# would is `#[expect]`-ed at the site with the invariant named and a test pinning
+# it, so the allowance goes red if the invariant stops holding. Deliberately not
+# a count: a tally here goes stale the first time one is added or removed.
 # Test modules opt out at the file or module level, where a panic is the
 # reporting mechanism rather than a failure mode.
 # `Decompress::reset` reinitialises at 15, so below that width it discards the

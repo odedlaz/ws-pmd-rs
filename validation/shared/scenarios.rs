@@ -10,7 +10,8 @@
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use permessage_deflate::{
-    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, PmdComposition,
+    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, EncoderConfig,
+    PmdComposition,
 };
 
 const TRAILER: &[u8] = &[0x00, 0x00, 0xff, 0xff];
@@ -127,7 +128,8 @@ fn decoder_for(response: &str) -> Decoder {
         .finish(&headers, PmdComposition::Compatible)
         .expect("the response is legal")
         .expect("the server selected it")
-        .into_decoder()
+        .into_codecs(EncoderConfig::new())
+        .1
 }
 
 fn feed(decoder: &mut Decoder, wire: &[u8], expected: &[u8]) -> Outcome {

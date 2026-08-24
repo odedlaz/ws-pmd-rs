@@ -41,7 +41,7 @@ pub enum NegotiationError {
 
     /// The response carried more than one `Sec-WebSocket-Extensions` field line.
     /// RFC 6455 section 11.3.2: the field "MAY appear multiple times in an HTTP
-    /// request ... However, [it] MUST NOT appear more than once in an HTTP
+    /// request ... However, \[it\] MUST NOT appear more than once in an HTTP
     /// response."
     ///
     /// Counted before the field is parsed, so this outranks both a grammar fault
@@ -147,6 +147,13 @@ pub enum CodecError {
     #[error("invalid DEFLATE stream")]
     InvalidStream,
 
+    /// A message could not be compressed into a form the peer can decode: the
+    /// backend refused it, or it ended the DEFLATE stream this side still owes
+    /// messages on, or it left a message without the empty block RFC 7692
+    /// section 7.2.1 step 2 requires.
+    #[error("compressing a message failed")]
+    CompressionFailed,
+
     /// The backend reported success while consuming and producing nothing. A
     /// caller that trusted it would spin forever, so it is an error here.
     #[error("the compression backend stopped making progress")]
@@ -175,4 +182,9 @@ pub enum ConfigError {
     /// for; only building a local inflater for it clamps to 9.
     #[error("peer compressor window bits must be 8 through 15")]
     PeerWindowBits,
+
+    /// A compression level outside zlib's domain. The level is a local choice
+    /// with no wire representation, so it is neither negotiated nor clamped.
+    #[error("compression level must be 0 through 9")]
+    CompressionLevel,
 }

@@ -53,21 +53,32 @@ EOF
 
     # `|| true` on both: an empty `grep` exits 1, and under `pipefail` that would
     # abort the whole run at the assignment -- silently, before this row is named.
-    local sys behaviour output api
+    local sys behaviour output api rc
     sys=$(cd "$dir" && cargo tree 2>/dev/null \
         | grep -oE '(libz-rs-sys|libz-sys|zlib-rs) v[0-9.]+' | cut -d' ' -f1 | sort -u | tr '\n' ' ' || true)
     sys=${sys% }
-    output=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1 || true)
+    # The suite's exit is kept, not discarded. Markers prove their own rows ran;
+    # a later failure in the same binary prints nothing and would otherwise leave
+    # every check below satisfied.
+    if output=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1); then rc=0; else rc=$?; fi
     behaviour=$(printf '%s\n' "$output" | grep -o 'BEHAVIOUR=.*' | cut -d= -f2 || true)
     # Distinct markers, and unanchored: `cargo test`'s progress dots land on the
     # same line as a `println!`, so `^PUBLIC_API=` matches only the first of two.
     # Counting distinct values also means a rerun cannot inflate the total.
-    api=$(printf '%s\n' "$output" | grep -o 'PUBLIC_API=[a-z-]*' | sort -u | wc -l | tr -d ' ')
+    # `grep`'s failure is contained in braces rather than trailing `|| true`,
+    # which would bind to `tr` and leave `pipefail` to abort the assignment on
+    # zero markers -- the one case the diagnostic below exists for.
+    api=$(printf '%s\n' "$output" \
+        | { grep -o 'PUBLIC_API=[a-z-]*' || true; } | sort -u | wc -l | tr -d ' ')
 
-    printf '  %-30s sys=[%-28s] behaviour=%-9s public-api=%s/2\n' \
-        "$name" "$sys" "${behaviour:-DID NOT RUN}" "$api"
+    printf '  %-30s sys=[%-28s] behaviour=%-9s public-api=%s/2 suite=%s\n' \
+        "$name" "$sys" "${behaviour:-DID NOT RUN}" "$api" "$rc"
     if [ "$sys" != "$want_sys" ]; then
         printf '    FAIL provenance: wanted [%s]\n' "$want_sys" >&2
+        failures=$((failures + 1))
+    fi
+    if [ "$rc" -ne 0 ]; then
+        printf '    FAIL suite: cargo test exited %s -- a row not covered by a marker failed\n' "$rc" >&2
         failures=$((failures + 1))
     fi
     # Both public-API rows must report. A count rather than a presence check,

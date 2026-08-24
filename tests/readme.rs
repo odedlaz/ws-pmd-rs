@@ -16,6 +16,18 @@
 //! turn this test red at the next version bump for a reason nobody would connect to it.
 //! Adding a `toml` fence leaves the count alone; converting one to `rust` does not.
 //!
+//! And it is a *text* instrument. It proves the README's blocks appear here; the compiler
+//! proves that what is not commented out compiles. Those are two facts, and a `/* */` around
+//! a body separates them -- the bytes stay byte-identical, the pin stays green, and nothing
+//! type-checks. Delimiting the bodies with markers and matching the region does not close
+//! that: a `/* */` placed around the markers themselves passes just as green, and any
+//! textual boundary can be enclosed the same way. Both were measured, not reasoned.
+//!
+//! That is a limit, not a hole to engineer around. Every *accidental* edit is caught --
+//! changing a body, changing the README, commenting a body out line by line. Wrapping a body
+//! in a block comment is deliberate, lands in a diff someone reads, and is the same class as
+//! deleting this file.
+//!
 //! The bodies sit at column 0 and the wrappers are `#[rustfmt::skip]`, because the pin is a
 //! byte comparison and any reindentation would break it.
 // One signature serves all three blocks, so every wrapper takes all seven bindings and

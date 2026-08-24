@@ -60,6 +60,12 @@ does not ship.
 - **Keep the reason with the code.** Module and item docs here carry the constraint that
   produced the shape. Preserve that when you edit around them, and update it when the
   reason changes.
+- **A claim here lives in several files at once.** What the test peers are independent of
+  sat in `Cargo.toml`, `src/`, `tests/` and all three docs — six sites for one sentence.
+  When you correct one, grep the stem tree-wide and write down the sense of **every** hit:
+  an unclassified hit reads exactly like an absent one, and the sweep's own output then
+  becomes the evidence it was checked. Then fix each site on its own terms. A qualification
+  that is load-bearing at one site is a false claim at a site that never rested on it.
 
 ## Claims you may not make
 

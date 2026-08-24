@@ -19,7 +19,7 @@
 
 use flate2::{Compress, FlushCompress, Status};
 
-use crate::codec::{advance, TRAILER};
+use crate::codec::TRAILER;
 use crate::config::EncoderConfig;
 use crate::error::CodecError;
 use crate::negotiated::Negotiated;
@@ -27,22 +27,29 @@ use crate::negotiated::Negotiated;
 /// Output taken from the backend per call, and the stack one message costs while
 /// it is being produced.
 ///
-/// One hard constraint: at least six, and the boundary is exact rather than
-/// cautious. `sync_flush` reads "the call left output room" as "the flush is
-/// complete", and the flush that ends every message emits a five-octet empty
-/// stored block -- so a buffer of exactly five returns with no room left, zlib
-/// re-arms the flush as incomplete, and the next call emits another whole block.
-/// Measured on both locked backends: 1 through 5 never terminate, 6 and above
-/// round-trip every payload.
+/// Output room offered to the backend per call.
 ///
-/// Everything above six trades backend round trips against stack, and
-/// correctness does not depend on where in that range this sits. It matches the
-/// decoder's, so one message costs the same either way through the codec.
-const SCRATCH: usize = 4096;
+/// A correctness parameter, not a stack-versus-round-trips dial. The terminating
+/// flush must complete a stored block, and a flush that returns with no room left
+/// is re-armed as incomplete, so the next call appends a *second* empty stored
+/// block. That output is valid wire and decodes correctly, so no round trip can
+/// see it -- only a length or byte comparison can, and at 4 KiB most large
+/// level-0 messages carried one.
+///
+/// Lowering this is therefore not a tuning choice. Raising it buys nothing
+/// either: it does **not** make the output buffer-independent, and must not be
+/// read as saying so. zlib sizes each level-0 stored block from the room it is
+/// handed and reaches no plateau here, so past three blocks our splitting
+/// differs from a 1-MiB-buffered compressor's while the total length matches to
+/// the octet. Levels 1 through 9 are byte-identical at every size measured,
+/// which is why `the_encoder_matches_a_differently_buffered_compressor` asserts
+/// bytes there and length everywhere.
+const BLOCK_ROOM: usize = 1 << 17;
 
-/// The floor above is load-bearing and its failure mode is a hang rather than an
-/// error, so it is enforced where it cannot be edited past.
-const _: () = assert!(SCRATCH >= 6, "a scratch buffer below six never completes a sync flush");
+/// The bound the flush half rests on: 65,535 octets of stored data behind a
+/// five-octet header must fit with room to spare, or the completing flush is the
+/// ambiguous one. Enforced because the failure it prevents is silent.
+const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored block");
 
 /// The narrowest window `flate2` will build a compressor for.
 ///
@@ -240,34 +247,29 @@ fn reset(compressor: &mut Compress) {
 /// RFC 7692 section 7.2.1 steps 1 through 3, for one complete message.
 fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
     let mut output = Vec::new();
-    let mut scratch = [0u8; SCRATCH];
-    feed(compressor, payload, &mut scratch, &mut output)?;
-    sync_flush(compressor, &mut scratch, &mut output)?;
-    strip_or_synthesize(payload, output)
+    feed(compressor, payload, &mut output)?;
+    sync_flush(compressor, &mut output)?;
+    let mut message = strip_or_synthesize(payload, output)?;
+    // A round reserves a whole `BLOCK_ROOM` and a short message needs almost
+    // none of it, so without this a seven-octet message would hand the host
+    // 128 KiB of slack to hold until it drops the message. One copy per message
+    // is the cheaper half of that trade.
+    message.shrink_to_fit();
+    Ok(message)
 }
 
 /// Step 1: the whole payload into raw DEFLATE, holding nothing back.
-fn feed(
-    compressor: &mut Compress,
-    payload: &[u8],
-    scratch: &mut [u8; SCRATCH],
-    output: &mut Vec<u8>,
-) -> Result<(), CodecError> {
+fn feed(compressor: &mut Compress, payload: &[u8], output: &mut Vec<u8>) -> Result<(), CodecError> {
     let mut input = payload;
     while !input.is_empty() {
-        let step = drive(compressor, input, scratch, FlushCompress::None)?;
-        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
-        output.extend_from_slice(&scratch[..step.produced]);
-        // Keyed on the residual, not on the status: `Ok` is a conforming answer
+        let round = drive(compressor, input, output, FlushCompress::None)?;
+        // Keyed on what moved, not on the status: `Ok` is a conforming answer
         // for a call with nowhere left to put output, so reading termination off
         // the status would drop a tail in silence.
-        if step.consumed == 0 && step.produced == 0 {
+        if round.consumed == 0 && round.produced == 0 {
             return Err(CodecError::Stalled);
         }
-        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
-        {
-            input = &input[step.consumed..];
-        }
+        input = input.get(round.consumed..).ok_or(CodecError::CompressionFailed)?;
     }
     Ok(())
 }
@@ -280,20 +282,19 @@ fn feed(
 /// is never used: it would end the DEFLATE stream and forfeit the history the
 /// next message may reference.
 ///
-/// The flush has to be repeated while the buffer keeps filling, because zlib
-/// only marks a flush complete once a call returns with output room left. The
-/// loop terminates because a flush's output is bounded by the message's own
-/// compressed size, and every continuing round takes a whole `SCRATCH` of it.
-fn sync_flush(
-    compressor: &mut Compress,
-    scratch: &mut [u8; SCRATCH],
-    output: &mut Vec<u8>,
-) -> Result<(), CodecError> {
+/// The loop repeats the flush while a call returns with no output room left,
+/// because that is zlib's documented protocol for a flush that did not fit. It
+/// is not a free repetition: zlib cannot signal "complete" apart from "the
+/// buffer filled exactly", so it sets `last_flush = -1` on a full return and a
+/// repeat becomes a *new* sync flush, which on an already-drained stream appends
+/// a second empty stored block. [`BLOCK_ROOM`] is what keeps the first call from
+/// ever being the ambiguous one; the loop remains for a backend holding more
+/// pending output than that, which would get the redundant block -- valid wire,
+/// never a wrong stream.
+fn sync_flush(compressor: &mut Compress, output: &mut Vec<u8>) -> Result<(), CodecError> {
     loop {
-        let step = drive(compressor, &[], scratch, FlushCompress::Sync)?;
-        #[expect(clippy::indexing_slicing, reason = "`drive` clamps to the buffers it was handed")]
-        output.extend_from_slice(&scratch[..step.produced]);
-        if step.produced < scratch.len() {
+        let round = drive(compressor, &[], output, FlushCompress::Sync)?;
+        if round.produced < round.room {
             return Ok(());
         }
     }
@@ -330,13 +331,18 @@ fn strip_or_synthesize(payload: &[u8], mut output: Vec<u8>) -> Result<Vec<u8>, C
     }
 }
 
-/// What one backend call moved, read off the slices that call was handed.
-struct Step {
+/// What one backend call moved, and the room it actually had.
+///
+/// `room` is read back rather than assumed: `Vec::reserve` may hand out more
+/// than it was asked for, and comparing a flush's output against the *request*
+/// would repeat a flush that completed with room to spare.
+struct Round {
     consumed: usize,
-    produced: usize,
+    produced: u64,
+    room: u64,
 }
 
-/// Drive the compressor once.
+/// Drive the compressor once, into the output vector's spare capacity.
 ///
 /// `StreamEnd` is a fault rather than termination: nothing here asks for
 /// `Finish`, so a backend reporting a finished stream has ended one this side
@@ -344,26 +350,29 @@ struct Step {
 fn drive(
     compressor: &mut Compress,
     input: &[u8],
-    scratch: &mut [u8],
+    output: &mut Vec<u8>,
     flush: FlushCompress,
-) -> Result<Step, CodecError> {
+) -> Result<Round, CodecError> {
+    output.reserve(BLOCK_ROOM);
+    let room = u64::try_from(output.capacity().saturating_sub(output.len()))
+        .map_err(|_| CodecError::CompressionFailed)?;
     let before = (compressor.total_in(), compressor.total_out());
     let status =
-        compressor.compress(input, scratch, flush).map_err(|_| CodecError::CompressionFailed)?;
+        compressor.compress_vec(input, output, flush).map_err(|_| CodecError::CompressionFailed)?;
     if status == Status::StreamEnd {
         return Err(CodecError::CompressionFailed);
     }
-    Ok(Step {
-        consumed: advance(before.0, compressor.total_in(), input.len()),
-        produced: advance(before.1, compressor.total_out(), scratch.len()),
-    })
+    let consumed = usize::try_from(compressor.total_in().saturating_sub(before.0))
+        .map_err(|_| CodecError::CompressionFailed)?;
+    Ok(Round { consumed, produced: compressor.total_out().saturating_sub(before.1), room })
 }
 
 #[cfg(test)]
 #[expect(clippy::expect_used, clippy::panic, reason = "a panic is how a test reports")]
 mod tests {
     use super::{
-        CompressorConfig, EMPTY_MESSAGE, MAX_COMPRESSOR_WINDOW_BITS, MIN_COMPRESSOR_WINDOW_BITS,
+        strip_or_synthesize, CodecError, CompressorConfig, EMPTY_MESSAGE,
+        MAX_COMPRESSOR_WINDOW_BITS, MIN_COMPRESSOR_WINDOW_BITS, TRAILER,
     };
     use crate::config::{ClientConfig, EncoderConfig, ServerConfig};
     use crate::negotiated::{Negotiated, PmdComposition, Role};
@@ -374,6 +383,29 @@ mod tests {
     #[test]
     fn the_synthesized_empty_message_is_the_rfc_octet() {
         assert_eq!(EMPTY_MESSAGE, &[0x00]);
+    }
+
+    /// Empty output for a payload that had bytes stays fatal, and only a unit
+    /// test can say so.
+    ///
+    /// No public input reaches that state: neither locked backend returns no
+    /// bytes for a non-empty payload, so an integration row cannot construct it
+    /// and cannot kill a mutant that widens the synthesis condition to the
+    /// output alone. Calling the step directly can.
+    #[test]
+    fn empty_output_for_a_non_empty_payload_is_not_synthesized() {
+        assert_eq!(
+            strip_or_synthesize(b"not empty", Vec::new()),
+            Err(CodecError::CompressionFailed),
+            "a payload with bytes must never take the empty-message branch"
+        );
+        assert_eq!(strip_or_synthesize(b"", Vec::new()), Ok(EMPTY_MESSAGE.to_vec()));
+
+        // The control that this row is not simply asserting that everything
+        // fails: a present trailer is stripped, exactly four octets.
+        let mut with_trailer = vec![0xf2, 0x48];
+        with_trailer.extend_from_slice(TRAILER);
+        assert_eq!(strip_or_synthesize(b"Hello", with_trailer), Ok(vec![0xf2, 0x48]));
     }
 
     /// The local direction of the agreement, for every width both roles can

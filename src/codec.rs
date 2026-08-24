@@ -182,9 +182,10 @@ impl Negotiated {
     ///
     /// The halves come back separate rather than joined because that is the
     /// shape a host needs: each direction moves into the task that owns it, and
-    /// a read that decodes never waits on a write that compresses. Both are
-    /// `Send`, which `gate-public-compile` asserts statically from outside the
-    /// package.
+    /// a read that decodes never waits on a write that compresses. Both halves
+    /// are `Send`, asserted statically from outside the crate in
+    /// `tests/encoder.rs`; the packaged-consumer graphs assert it again on the
+    /// unpacked `.crate`. Neither promises `Sync`, because nothing needs it.
     ///
     /// ```
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
@@ -223,15 +224,14 @@ impl Negotiated {
     /// # Ok::<(), permessage_deflate::NegotiationError>(())
     /// ```
     ///
-    /// Spending the same agreement twice does not compile. The passing example
-    /// is the control for both of these: it differs from the first by only the
-    /// method name, and from this one by only the second call.
+    /// Spending the same agreement twice does not compile either.
     ///
     /// The pinned codes are checked on nightly and ignored on stable, where any
     /// compilation failure satisfies a bare `compile_fail`. What rules out an
-    /// unrelated break there is that control: the preamble is byte-identical in
-    /// all three snippets, so a setup that stopped compiling turns the passing
-    /// one red instead of quietly satisfying these two.
+    /// unrelated break there is the passing example above: the preamble is
+    /// byte-identical in every snippet here, so a setup that stopped compiling
+    /// turns the passing one red instead of quietly satisfying the failing ones.
+    /// That control does not depend on a toolchain channel.
     ///
     /// ```compile_fail,E0382
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
@@ -247,6 +247,33 @@ impl Negotiated {
     /// #     .expect("the server selected it");
     /// let (encoder, decoder) = agreed.into_codecs(EncoderConfig::new());
     /// let (again, and_again) = agreed.into_codecs(EncoderConfig::new());
+    /// # Ok::<(), permessage_deflate::NegotiationError>(())
+    /// ```
+    ///
+    /// And the agreement cannot be duplicated, which the row above does not
+    /// establish: moving the same value twice fails whether or not the type is
+    /// cloneable, so a derived `Clone` leaves that row green while one agreement
+    /// mints two pairs. This row is the only one in the set that catches it.
+    ///
+    /// Its receiver must stay owned. `&T` implements `Clone` for every `T`, so
+    /// cloning through a reference resolves to the blanket impl and compiles --
+    /// which turns this row red rather than green, because a snippet that
+    /// compiles is the one thing `compile_fail` enforces on every channel. The
+    /// edit that breaks it looks like a tidy-up, and it announces itself.
+    ///
+    /// ```compile_fail,E0599
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use permessage_deflate::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
+    /// #     .expect("the server selected it");
+    /// let spare = agreed.clone();
     /// # Ok::<(), permessage_deflate::NegotiationError>(())
     /// ```
     #[must_use]
@@ -421,7 +448,7 @@ struct Step<'a> {
 /// One backend call moves its `total_*` counter by at most the length of the
 /// buffer it was handed, so clamping the `u64` delta to that length is exact
 /// rather than lossy — and it keeps a fallible cast out of the hot loop.
-pub fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
+fn advance(before: u64, after: u64, buffer_len: usize) -> usize {
     usize::try_from(after.saturating_sub(before)).unwrap_or(buffer_len).min(buffer_len)
 }
 

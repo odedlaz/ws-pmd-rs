@@ -143,9 +143,13 @@ frame:
   bit on a message's first frame picks between them. A message that arrived with RSV1 clear
   goes to the application as it is; passing it to `decompress` instead is the easiest wrong
   call in this API, and the signature takes bytes and no bit, so nothing here can catch it.
-- **Fail the connection on RSV1 where the RFC forbids it.** RFC 7692 §6: "An endpoint MUST
-  NOT set the 'Per-Message Compressed' bit of control frames and non-first fragments of a
-  data message. An endpoint receiving such a frame MUST _Fail the WebSocket Connection_."
+- **Fail the connection on RSV1 where the RFC forbids it.** RFC 7692 §6 puts this on the
+  receiver and not only on the sender:
+
+  > An endpoint MUST NOT set the "Per-Message Compressed" bit of control frames and
+  > non-first fragments of a data message.  An endpoint receiving such a frame MUST _Fail
+  > the WebSocket Connection_.
+
 - **Fail the connection on a reserved bit nothing defines.** RFC 6455 §5.2 requires it of any
   nonzero RSV bit no negotiated extension gives a meaning to. `permessage-deflate` gives RSV1
   a meaning once it has been agreed, and gives RSV2 and RSV3 none ever.

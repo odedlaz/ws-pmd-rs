@@ -49,19 +49,31 @@ default-features = false
 EOF
     cp "$root/validation/shared/scenarios.rs" "$dir/tests/scenarios.rs"
     cp "$root/validation/consumer-matrix/probe.rs" "$dir/tests/probe.rs"
+    cp "$root/validation/consumer-matrix/public_api.rs" "$dir/tests/public_api.rs"
 
     # `|| true` on both: an empty `grep` exits 1, and under `pipefail` that would
     # abort the whole run at the assignment -- silently, before this row is named.
-    local sys behaviour
+    local sys behaviour output api
     sys=$(cd "$dir" && cargo tree 2>/dev/null \
         | grep -oE '(libz-rs-sys|libz-sys|zlib-rs) v[0-9.]+' | cut -d' ' -f1 | sort -u | tr '\n' ' ' || true)
     sys=${sys% }
-    behaviour=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1 \
-        | grep -o 'BEHAVIOUR=.*' | cut -d= -f2 || true)
+    output=$(cd "$dir" && cargo test --quiet -- --nocapture 2>&1 || true)
+    behaviour=$(printf '%s\n' "$output" | grep -o 'BEHAVIOUR=.*' | cut -d= -f2 || true)
+    # Distinct markers, and unanchored: `cargo test`'s progress dots land on the
+    # same line as a `println!`, so `^PUBLIC_API=` matches only the first of two.
+    # Counting distinct values also means a rerun cannot inflate the total.
+    api=$(printf '%s\n' "$output" | grep -o 'PUBLIC_API=[a-z-]*' | sort -u | wc -l | tr -d ' ')
 
-    printf '  %-30s sys=[%-28s] behaviour=%s\n' "$name" "$sys" "${behaviour:-DID NOT RUN}"
+    printf '  %-30s sys=[%-28s] behaviour=%-9s public-api=%s/2\n' \
+        "$name" "$sys" "${behaviour:-DID NOT RUN}" "$api"
     if [ "$sys" != "$want_sys" ]; then
         printf '    FAIL provenance: wanted [%s]\n' "$want_sys" >&2
+        failures=$((failures + 1))
+    fi
+    # Both public-API rows must report. A count rather than a presence check,
+    # because one marker plus one failure reads the same as a pass otherwise.
+    if [ "$api" != "2" ]; then
+        printf '    FAIL public API: %s of 2 rows reported -- the published surface does not build this consumer\n' "$api" >&2
         failures=$((failures + 1))
     fi
     if [ -z "$behaviour" ]; then

@@ -26,8 +26,11 @@ use crate::negotiated::Negotiated;
 
 /// Output room offered to the backend per call.
 ///
-/// A correctness parameter, not a tuning dial -- the decoder trades its scratch
-/// against stack, and this trades against nothing. The terminating
+/// A correctness parameter first, which is what separates it from the decoder's
+/// scratch: below a bound this is wrong, not merely slower. It still trades --
+/// allocator requests, backend rounds, and above the payload-derived branch which
+/// level-0 block partitioning the backend is permitted to choose -- so a
+/// conforming value is not a cost-free or byte-identical one. The terminating
 /// flush must complete a stored block, and a flush that returns with no room left
 /// is re-armed as incomplete, so the next call appends a *second* empty stored
 /// block. That output is valid wire and decodes correctly, so no round trip can
@@ -63,10 +66,10 @@ const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored
 /// what the backend still holds, not by the message.
 ///
 /// So this is a measured bound on that residue rather than a derived one, and it
-/// is comfortable rather than tight: consumption is flat at 10 octets below one
-/// maximal stored block and 15 above it, so the worst case across the whole branch
-/// leaves 49 of the 64 unused -- about four times what is needed, on both locked
-/// backends. It is nonetheless load-bearing at level 0 alone, because there the
+/// is comfortable rather than tight: consumption is `5 x blocks + 5`, and at most
+/// two blocks fit below the branch edge, so it is ten or fifteen octets and the
+/// worst case leaves 49 of the 64 unused -- bounded by arithmetic, not by the
+/// sizes that happened to be sampled, and identical on both locked backends. It is nonetheless load-bearing at level 0 alone, because there the
 /// flush drains the whole stored message and one octet short appends a redundant
 /// block, while at levels 1 through 9 the compressed residue leaves thousands
 /// spare and the margin cannot be observed at all.
@@ -91,10 +94,12 @@ const FRAMING_MARGIN: usize = 64;
 /// *completes* the flush.
 ///
 /// Below the ceiling that residue is bounded by the payload, because at level 0
-/// the flush drains the whole stored message and [`FRAMING_MARGIN`] covers its
-/// framing -- tightly, and measured. At or above the ceiling the residue is
-/// bounded instead by one maximal stored block, which is what [`BLOCK_ROOM`]
-/// exceeds.
+/// the flush drains the whole stored message, and [`FRAMING_MARGIN`] covers its
+/// framing with room to spare: two maximal stored blocks reach 131,070, so at most
+/// two block headers fit below the branch edge and consumption is `5 x blocks + 5`
+/// -- ten or fifteen octets, by arithmetic rather than by sampling. At or above the
+/// ceiling the residue is bounded instead by one maximal stored block, which is
+/// what [`BLOCK_ROOM`] exceeds.
 fn room_for(payload_len: usize) -> usize {
     BLOCK_ROOM.min(payload_len.saturating_add(FRAMING_MARGIN))
 }

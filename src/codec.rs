@@ -184,8 +184,7 @@ impl Negotiated {
     /// shape a host needs: each direction moves into the task that owns it, and
     /// a read that decodes never waits on a write that compresses. Both halves
     /// are `Send`, asserted statically from outside the crate in
-    /// `tests/encoder.rs`; the packaged-consumer graphs assert it again on the
-    /// unpacked `.crate`. Neither promises `Sync`, because nothing needs it.
+    /// `tests/encoder.rs`. Neither promises `Sync`, because nothing needs it.
     ///
     /// ```
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};

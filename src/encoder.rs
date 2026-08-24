@@ -36,20 +36,44 @@ use crate::negotiated::Negotiated;
 /// see it -- only a length or byte comparison can, and at 4 KiB most large
 /// level-0 messages carried one.
 ///
-/// Lowering this is therefore not a tuning choice. Raising it buys nothing
-/// either: it does **not** make the output buffer-independent, and must not be
-/// read as saying so. zlib sizes each level-0 stored block from the room it is
-/// handed and reaches no plateau here, so past three blocks our splitting
-/// differs from a 1-MiB-buffered compressor's while the total length matches to
-/// the octet. Levels 1 through 9 are byte-identical at every size measured,
-/// which is why `the_encoder_matches_a_differently_buffered_compressor` asserts
-/// bytes there and length everywhere.
+/// Lowering this is therefore not a tuning choice. Raising it does **not** make
+/// the output buffer-independent, and must not be read as saying so: zlib sizes
+/// each level-0 stored block from the room it is handed, so a message needing
+/// more than one round emits one more block header than an unbounded compressor
+/// would. There is no fixed value above which that stops -- the first affected
+/// size tracks this constant, measured at three ceilings -- and removing it would
+/// mean reserving every message in full, taxing the compressible common case to
+/// tidy the incompressible one. Levels 1 through 9 are byte-identical at every
+/// size measured, which is the scope
+/// `the_encoder_matches_a_differently_buffered_compressor` asserts.
 const BLOCK_ROOM: usize = 1 << 17;
 
 /// The bound the flush half rests on: 65,535 octets of stored data behind a
 /// five-octet header must fit with room to spare, or the completing flush is the
 /// ambiguous one. Enforced because the failure it prevents is silent.
 const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored block");
+
+/// Slack above a payload's own length for the octets DEFLATE adds to it.
+///
+/// The widest case is level 0: a five-octet header per maximal stored block plus
+/// the flush's own empty block. Below the cap that is at most three blocks' worth
+/// -- 20 octets -- so 64 is the bound with room over.
+const FRAMING_MARGIN: usize = 64;
+
+/// Output room to request per round, for a message of this size.
+///
+/// [`BLOCK_ROOM`] is a ceiling rather than a fixed request, because it is charged
+/// per message and not per connection: a host sending short frames would
+/// otherwise ask the allocator for 128 KiB to hold seven octets.
+///
+/// Either case is sufficient and the message picks one. A message whose entire
+/// possible output fits below the ceiling gets room for all of it, so its flush
+/// completes on the first call and no block boundary is ever chosen by the
+/// buffer. Anything larger gets the ceiling, which exceeds one maximal stored
+/// block, so both properties hold across however many rounds it takes.
+fn room_for(payload_len: usize) -> usize {
+    BLOCK_ROOM.min(payload_len.saturating_add(FRAMING_MARGIN))
+}
 
 /// The narrowest window `flate2` will build a compressor for.
 ///
@@ -246,23 +270,31 @@ fn reset(compressor: &mut Compress) {
 
 /// RFC 7692 section 7.2.1 steps 1 through 3, for one complete message.
 fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let room = room_for(payload.len());
     let mut output = Vec::new();
-    feed(compressor, payload, &mut output)?;
-    sync_flush(compressor, &mut output)?;
+    feed(compressor, payload, &mut output, room)?;
+    sync_flush(compressor, &mut output, room)?;
     let mut message = strip_or_synthesize(payload, output)?;
-    // A round reserves a whole `BLOCK_ROOM` and a short message needs almost
-    // none of it, so without this a seven-octet message would hand the host
-    // 128 KiB of slack to hold until it drops the message. One copy per message
-    // is the cheaper half of that trade.
+    // A round reserves room for what the message could produce and a short one
+    // needs almost none of it, so the returned vector would otherwise carry that
+    // slack until the host drops it. What the allocator does with the request is
+    // its own business -- `Vec::shrink_to_fit` may shrink in place or reallocate,
+    // and either way may leave excess capacity -- so this asks for the space back
+    // without claiming it comes back.
     message.shrink_to_fit();
     Ok(message)
 }
 
 /// Step 1: the whole payload into raw DEFLATE, holding nothing back.
-fn feed(compressor: &mut Compress, payload: &[u8], output: &mut Vec<u8>) -> Result<(), CodecError> {
+fn feed(
+    compressor: &mut Compress,
+    payload: &[u8],
+    output: &mut Vec<u8>,
+    room: usize,
+) -> Result<(), CodecError> {
     let mut input = payload;
     while !input.is_empty() {
-        let round = drive(compressor, input, output, FlushCompress::None)?;
+        let round = drive(compressor, input, output, FlushCompress::None, room)?;
         // Keyed on what moved, not on the status: `Ok` is a conforming answer
         // for a call with nowhere left to put output, so reading termination off
         // the status would drop a tail in silence.
@@ -291,9 +323,13 @@ fn feed(compressor: &mut Compress, payload: &[u8], output: &mut Vec<u8>) -> Resu
 /// ever being the ambiguous one; the loop remains for a backend holding more
 /// pending output than that, which would get the redundant block -- valid wire,
 /// never a wrong stream.
-fn sync_flush(compressor: &mut Compress, output: &mut Vec<u8>) -> Result<(), CodecError> {
+fn sync_flush(
+    compressor: &mut Compress,
+    output: &mut Vec<u8>,
+    room: usize,
+) -> Result<(), CodecError> {
     loop {
-        let round = drive(compressor, &[], output, FlushCompress::Sync)?;
+        let round = drive(compressor, &[], output, FlushCompress::Sync, room)?;
         if round.produced < round.room {
             return Ok(());
         }
@@ -352,8 +388,9 @@ fn drive(
     input: &[u8],
     output: &mut Vec<u8>,
     flush: FlushCompress,
+    room: usize,
 ) -> Result<Round, CodecError> {
-    output.reserve(BLOCK_ROOM);
+    output.reserve(room);
     let room = u64::try_from(output.capacity().saturating_sub(output.len()))
         .map_err(|_| CodecError::CompressionFailed)?;
     let before = (compressor.total_in(), compressor.total_out());

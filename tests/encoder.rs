@@ -647,48 +647,63 @@ fn host_side_fragment_splitting_preserves_the_bytes() {
     }
 }
 
-/// The encoder emits no redundant empty blocks, at any level or message size.
+/// The encoder emits no redundant empty blocks.
 ///
-/// The reference is buffered at 1 MiB, which is deliberately *not* the crate's
-/// own `BLOCK_ROOM`: matching a compressor that shares the encoder's buffer
+/// The reference is buffered at 1 MiB, deliberately *not* the crate's own
+/// per-round room: matching a compressor that shares the encoder's buffer
 /// strategy would prove only that the two agree.
 ///
-/// Two different assertions, because two different things are true.
+/// A repeated sync flush that was already complete appends a second empty stored
+/// block — valid wire, five wasted octets, invisible to every round-trip row in
+/// this file, and detectable only by comparing against a differently buffered
+/// compressor. Before the encoder gave the flush room to finish in one call, most
+/// large level-0 messages carried one.
 ///
-/// **Length, at every level.** A repeated sync flush that was already complete
-/// appends a second empty stored block — valid wire, five wasted octets, and
-/// invisible to every round-trip row in this file. Total length is what catches
-/// it. Before the encoder gave the flush room to finish in one call, 51 of 74
-/// level-0 sizes carried one.
+/// Level 0 is validity-only here, and the reason is a measurement rather than
+/// caution. zlib sizes each stored block from the output room it is handed, so a
+/// message whose *output* outgrows one round emits one more block header than an
+/// unbounded compressor would. No fixed room stops that — the first affected size
+/// tracks the room itself, measured at three ceilings — and removing it would mean
+/// reserving every message in full, taxing the compressible common case to tidy
+/// the incompressible one. The threshold is a function of the compressed size and
+/// not the input length, so pinning it here would duplicate the encoder's own
+/// arithmetic in a test. Level 0's bytes are pinned instead by RFC 7692 section
+/// 7.2.3.3 in `the_rfc_7692_vectors_are_reproduced_byte_for_byte` and by the
+/// same-arm routing comparison in
+/// `the_encoder_matches_direct_flate2_at_every_level`.
 ///
-/// **Bytes, at levels 1 through 9 only.** zlib sizes each level-0 stored block
-/// from the output room it is handed, with no plateau at any value this encoder
-/// could afford to reserve, so above three blocks the *splitting* differs from a
-/// 1-MiB compressor's while the length matches to the octet. That is a buffer
-/// strategy showing through, not a defect, and it is a property of level 0 alone.
-/// Level 0's bytes are pinned instead by RFC 7692 section 7.2.3.3 in
-/// `the_rfc_7692_vectors_are_reproduced_byte_for_byte` and by the same-arm
-/// routing comparison in `the_encoder_matches_direct_flate2_at_every_level`.
+/// Nothing is lost by that: the redundant flush block this row exists to catch is
+/// produced by code every level shares, so a regression turns the levels 1
+/// through 9 rows red at every size.
+///
+/// Levels 1 through 9 are byte-identical at every size here, including the
+/// stored-block multiples and the sizes either side of the room ceiling, which is
+/// where the level-0 divergence lives.
 #[test]
 fn the_encoder_matches_a_differently_buffered_compressor() {
+    // Includes the maximal-stored-block multiples and sizes either side of the
+    // crate's per-round room ceiling, which is where the level-0 divergence lives.
+    let sizes = [
+        1usize, 5, 4_096, 60_000, 65_534, 65_535, 65_536, 131_070, 131_071, 131_072, 131_073,
+        196_605, 200_000, 400_000,
+    ];
     for level in 0..=9u32 {
-        for len in [1usize, 5, 4_096, 60_000, 65_540, 200_000, 400_000] {
+        for len in sizes {
             for (shape, payload) in
                 [("incompressible", incompressible(len, 199)), ("repetitive", vec![b'q'; len])]
             {
                 let config = EncoderConfig::new().compression_level(level).expect("zlib's domain");
                 let ours = send(&mut client_codecs(15, 15, false, config), &payload);
                 let reference = direct(level, 15, &payload);
-                assert_eq!(
-                    ours.len(),
-                    reference.len(),
-                    "level {level}, {shape}, {len} bytes: the encoder emitted {} octets where a \
-                     1-MiB-buffered compressor emits {}, a difference only a redundant empty \
-                     block explains",
-                    ours.len(),
-                    reference.len()
-                );
                 if level > 0 {
+                    assert_eq!(
+                        ours.len(),
+                        reference.len(),
+                        "level {level}, {shape}, {len} bytes: the encoder emitted {} octets where \
+                         a 1-MiB-buffered compressor emits {}",
+                        ours.len(),
+                        reference.len()
+                    );
                     assert_eq!(ours, reference, "level {level}, {shape}, {len} bytes");
                 }
                 assert_eq!(

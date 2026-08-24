@@ -40,15 +40,21 @@ pub enum NegotiationError {
     DuplicateExtension,
 
     /// The response carried more than one `Sec-WebSocket-Extensions` field line.
-    /// RFC 6455 section 11.3.2: the field "MAY appear multiple times in an HTTP
-    /// request ... However, \[it\] MUST NOT appear more than once in an HTTP
-    /// response."
+    ///
+    /// RFC 6455 section 11.3.2 as published forbids that, but verified erratum
+    /// EID 3433 replaces the sentence with "The |Sec-WebSocket-Extensions|
+    /// header field MAY appear multiple times in an HTTP response", section
+    /// 4.2.2's own construction steps build a response split "between multiple
+    /// instances" of the field, and section 9.1 notes it "MAY be split or
+    /// combined across multiple lines". Rejecting the shape is therefore this
+    /// crate's choice and not the RFC's, and it fails a peer the corrected text
+    /// permits.
     ///
     /// Counted before the field is parsed, so this outranks both a grammar fault
     /// on a repeated line and the shape carrying no `permessage-deflate` at all,
     /// which would otherwise decline and hand the host an uncompressed
     /// connection with no error.
-    #[error("Sec-WebSocket-Extensions must not appear more than once in a response")]
+    #[error("Sec-WebSocket-Extensions appeared on more than one response field line")]
     RepeatedResponseHeader,
 
     /// The client required `server_no_context_takeover` and the response did not

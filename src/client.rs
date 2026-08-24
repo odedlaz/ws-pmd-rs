@@ -137,7 +137,9 @@ impl ClientHandshake {
         composition: PmdComposition,
     ) -> Result<Option<Negotiated>, NegotiationError> {
         // Response-only, and so not in `grammar::validate`, which the server
-        // runs on a request where RFC 6455 section 11.3.2 permits repetition.
+        // runs on a request, where RFC 6455 section 11.3.2 permits repetition
+        // outright. On a response that section's MUST NOT is struck by verified
+        // erratum EID 3433, so this rejection is crate policy, not the RFC's.
         if headers.get_all(SEC_WEBSOCKET_EXTENSIONS).iter().nth(1).is_some() {
             return Err(NegotiationError::RepeatedResponseHeader);
         }

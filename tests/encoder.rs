@@ -667,9 +667,10 @@ fn host_side_fragment_splitting_preserves_the_bytes() {
 /// rather than a convenience. Below the ceiling the room is derived from the
 /// payload, and level 0 is byte-exact there — that band is the *only* place the
 /// encoder's framing margin is observable, because a flush that outgrows its room
-/// by even one octet appends a redundant block. Measured, the tightest case has 54
-/// octets of headroom out of 64, so the margin is load-bearing and this is what
-/// holds it.
+/// by even one octet appends a redundant block. `FRAMING_MARGIN`'s own doc has
+/// the number: consumption is `5 x blocks + 5`, and at most two blocks fit below
+/// the branch edge, so it is ten or fifteen octets, and the worst case leaves 49
+/// of the 64 unused -- bounded by arithmetic, not by the sizes sampled here.
 ///
 /// Above the ceiling the room is a constant, and zlib sizes each stored block from
 /// what it is handed, so a message whose output needs more than one round emits

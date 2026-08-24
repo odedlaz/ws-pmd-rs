@@ -205,7 +205,7 @@ pub struct EncoderConfig {
 
 impl Default for EncoderConfig {
     /// The backend's own default, read from it rather than restated here.
-    /// `the_default_level_is_inside_the_domain` pins it against
+    /// `a_level_outside_the_domain_is_refused_at_configuration` pins it against
     /// [`EncoderConfig::compression_level`]'s range.
     fn default() -> Self {
         Self { level: flate2::Compression::default().level() }

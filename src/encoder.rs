@@ -69,10 +69,11 @@ const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored
 /// is comfortable rather than tight: consumption is `5 x blocks + 5`, and at most
 /// two blocks fit below the branch edge, so it is ten or fifteen octets and the
 /// worst case leaves 49 of the 64 unused -- bounded by arithmetic, not by the
-/// sizes that happened to be sampled, and identical on both locked backends. It is nonetheless load-bearing at level 0 alone, because there the
-/// flush drains the whole stored message and one octet short appends a redundant
-/// block, while at levels 1 through 9 the compressed residue leaves thousands
-/// spare and the margin cannot be observed at all.
+/// sizes that happened to be sampled, and identical on both locked backends. It
+/// is nonetheless load-bearing at level 0 alone, because there the flush drains
+/// the whole stored message and one octet short appends a redundant block, while
+/// at levels 1 through 9 the compressed residue leaves thousands spare and the
+/// margin cannot be observed at all.
 ///
 /// `the_encoder_matches_a_differently_buffered_compressor` therefore asserts
 /// level 0 byte-exactly across this branch, which is what holds the number:

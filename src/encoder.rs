@@ -63,11 +63,13 @@ const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored
 /// what the backend still holds, not by the message.
 ///
 /// So this is a measured bound on that residue rather than a derived one, and it
-/// is tight: at a 16,384-octet payload the completing flush emits 16,394 octets
-/// into 16,448 of room, 54 of the 64 spent. It is also load-bearing at level 0
-/// alone -- there the flush drains the whole stored message, so one octet short
-/// appends a redundant block, while at levels 1 through 9 the compressed residue
-/// leaves thousands of octets spare and the margin is unobservable.
+/// is comfortable rather than tight: consumption is flat at 10 octets below one
+/// maximal stored block and 15 above it, so the worst case across the whole branch
+/// leaves 49 of the 64 unused -- about four times what is needed, on both locked
+/// backends. It is nonetheless load-bearing at level 0 alone, because there the
+/// flush drains the whole stored message and one octet short appends a redundant
+/// block, while at levels 1 through 9 the compressed residue leaves thousands
+/// spare and the margin cannot be observed at all.
 ///
 /// `the_encoder_matches_a_differently_buffered_compressor` therefore asserts
 /// level 0 byte-exactly across this branch, which is what holds the number:

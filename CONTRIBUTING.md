@@ -108,8 +108,9 @@ which one in the commit message.
 Three conventions in this suite are deliberate, and a change that quietly undoes one is
 worse than no test at all:
 
-- **The decoder is driven by an independent `flate2` peer, not by this crate's encoder.**
-  A mistake shared by both sides would otherwise pass as a successful round trip.
+- **The decoder is driven by a `flate2` peer, never by this crate's own encoder.** A mistake
+  shared by both sides would otherwise pass as a successful round trip. That peer is
+  independent of our codec logic, not of DEFLATE — it is the same engine the crate calls.
 - **The dev-dependency on `flate2` names no backend.** Asking for one there would satisfy
   `flate2` whatever the crate's own feature table forwards, so a broken forward would still
   build and every test would still pass — the suite would be proving the dev-dependency's

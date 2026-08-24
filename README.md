@@ -164,8 +164,9 @@ The crate forbids `unsafe` and denies panicking constructs in production code: e
 that could panic, index, or exit out of band carries an allowance with the invariant named
 and a test pinning it, so the allowance goes red if the invariant stops holding.
 
-The decoder's tests drive it from an independent `flate2` peer rather than from this crate's
-own encoder, so a mistake shared by both cannot pass as a round trip. Beyond the crate's own
+The decoder's tests drive it from a `flate2` peer independent of this crate's encoder, so a
+mistake shared by both cannot pass as a round trip. That peer is the same engine the crate
+itself calls, so it checks this crate's codec logic and not DEFLATE. Beyond the crate's own
 suite, `validation/` holds two named-backend arms and a consumer matrix that builds the
 *packaged* crate from outside. See [`validation/README.md`](validation/README.md).
 

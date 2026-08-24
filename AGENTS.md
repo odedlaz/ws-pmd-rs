@@ -53,7 +53,7 @@ does not ship.
 - **Production code may not panic, index, or exit out of band.** Where a site would, add
   the allowance *and* the test pinning the invariant in the same change, so the allowance
   goes red if the invariant stops holding.
-- **The decoder's tests drive it from an independent `flate2` peer, never from this crate's
+- **The decoder's tests drive it from a `flate2` peer, never from this crate's own
   encoder,** and the `flate2` dev-dependency names no backend on purpose. Both look like
   tidy-ups waiting to happen. Undoing either makes the suite prove the test's own setup
   instead of the crate.

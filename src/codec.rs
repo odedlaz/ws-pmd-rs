@@ -501,7 +501,7 @@ mod tests {
     use crate::config::EncoderConfig;
     use crate::negotiated::{Negotiated, Role};
 
-    /// A raw DEFLATE stream ending in BFINAL, from an independent compressor.
+    /// A raw DEFLATE stream ending in BFINAL.
     fn raw_deflate(plain: &[u8]) -> Vec<u8> {
         let mut compressor = Compress::new_with_window_bits(Compression::default(), false, 15);
         let mut wire = vec![0u8; plain.len() + 64];

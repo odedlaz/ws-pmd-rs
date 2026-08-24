@@ -49,7 +49,12 @@ fn plain_decoder() -> Decoder {
     decoder_for(b"permessage-deflate")
 }
 
-/// An independent RFC 7692 peer: raw DEFLATE, `Z_SYNC_FLUSH`, trailer stripped.
+/// An RFC 7692 peer compressor: raw DEFLATE, `Z_SYNC_FLUSH`, trailer stripped.
+///
+/// Independent of this crate's `Encoder` and therefore of our reading of RFC
+/// 7692, which is the failure this oracle exists to catch. It is *not*
+/// independent of `flate2` — see `Verifier` in `encoder.rs` for that limit and
+/// for what does supply DEFLATE-layer independence.
 struct Peer(Compress);
 
 impl Peer {

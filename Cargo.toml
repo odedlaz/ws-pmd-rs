@@ -46,8 +46,10 @@ thiserror = "2"
 version = "1.0.31"
 default-features = false
 
-# The decoder's tests drive it from an independent `flate2` peer rather than this
-# crate's own encoder, so a shared mistake cannot pass as a round trip.
+# The decoder's tests drive it from a `flate2` peer rather than this crate's own
+# encoder, so a shared mistake cannot pass as a round trip. That peer is not
+# independent of `flate2` itself; `tests/encoder.rs` states that limit on its
+# `Verifier` and what does supply DEFLATE-layer independence.
 #
 # It names no backend on purpose. Asking for one here would satisfy `flate2`
 # whatever the feature table above forwards, so a broken forward would still

@@ -24,12 +24,10 @@ use crate::config::EncoderConfig;
 use crate::error::CodecError;
 use crate::negotiated::Negotiated;
 
-/// Output taken from the backend per call, and the stack one message costs while
-/// it is being produced.
-///
 /// Output room offered to the backend per call.
 ///
-/// A correctness parameter, not a stack-versus-round-trips dial. The terminating
+/// A correctness parameter, not a tuning dial -- the decoder trades its scratch
+/// against stack, and this trades against nothing. The terminating
 /// flush must complete a stored block, and a flush that returns with no room left
 /// is re-armed as incomplete, so the next call appends a *second* empty stored
 /// block. That output is valid wire and decodes correctly, so no round trip can
@@ -43,9 +41,10 @@ use crate::negotiated::Negotiated;
 /// would. There is no fixed value above which that stops -- the first affected
 /// size tracks this constant, measured at three ceilings -- and removing it would
 /// mean reserving every message in full, taxing the compressible common case to
-/// tidy the incompressible one. Levels 1 through 9 are byte-identical at every
-/// size measured, which is the scope
-/// `the_encoder_matches_a_differently_buffered_compressor` asserts.
+/// tidy the incompressible one. What is byte-identical at every size measured is
+/// levels 1 through 9, plus level 0 below the payload-derived branch, and that is
+/// exactly the scope `the_encoder_matches_a_differently_buffered_compressor`
+/// asserts.
 const BLOCK_ROOM: usize = 1 << 17;
 
 /// The bound the flush half rests on: 65,535 octets of stored data behind a
@@ -83,11 +82,17 @@ const FRAMING_MARGIN: usize = 64;
 /// per message and not per connection: a host sending short frames would
 /// otherwise ask the allocator for 128 KiB to hold seven octets.
 ///
-/// Either case is sufficient and the message picks one. A message whose entire
-/// possible output fits below the ceiling gets room for all of it, so its flush
-/// completes on the first call and no block boundary is ever chosen by the
-/// buffer. Anything larger gets the ceiling, which exceeds one maximal stored
-/// block, so both properties hold across however many rounds it takes.
+/// Neither case is a request to hold the whole output, which is the reading to
+/// avoid: [`drive`] re-reserves every round, so a short room costs rounds rather
+/// than octets, and at level 1 the output can exceed this request by thousands of
+/// octets with no change to a single byte. What has to fit is the call that
+/// *completes* the flush.
+///
+/// Below the ceiling that residue is bounded by the payload, because at level 0
+/// the flush drains the whole stored message and [`FRAMING_MARGIN`] covers its
+/// framing -- tightly, and measured. At or above the ceiling the residue is
+/// bounded instead by one maximal stored block, which is what [`BLOCK_ROOM`]
+/// exceeds.
 fn room_for(payload_len: usize) -> usize {
     BLOCK_ROOM.min(payload_len.saturating_add(FRAMING_MARGIN))
 }

@@ -86,10 +86,14 @@ impl Verifier {
 /// comparing one backend's bytes with another's, and this never leaves the arm
 /// it was compiled into.
 ///
-/// Buffered at 1 MiB, deliberately *not* the crate's own `BLOCK_ROOM`. Matching a
-/// reference that shares the encoder's buffer strategy would prove only that the
-/// two agree; matching one buffered differently is what shows the encoder's
-/// output does not depend on the buffer at all.
+/// Buffered at 1 MiB, deliberately *not* the crate's own per-round room. Matching
+/// a reference that shares the encoder's buffer strategy would prove only that the
+/// two agree; matching one buffered differently is what makes the comparison
+/// evidence at all.
+///
+/// It does not show the encoder's output is buffer-independent, and must not be
+/// read that way: level 0 above the payload-derived branch is not, which is why
+/// the row that uses this helper scopes its byte assertions.
 fn direct(level: u32, window_bits: u8, payload: &[u8]) -> Vec<u8> {
     let mut compressor =
         Compress::new_with_window_bits(Compression::new(level), false, window_bits);
@@ -276,9 +280,9 @@ fn the_rfc_7692_vectors_are_reproduced_byte_for_byte() {
 // ----------------------------------------------------- gate-rfc-transform
 
 /// The whole payload reaches the wire, the trailer is removed exactly, and a
-/// message far larger than one scratch refill still round-trips.
+/// message far larger than one backend round still round-trips.
 #[test]
-fn a_message_spanning_many_scratch_refills_round_trips_exactly() {
+fn a_message_spanning_many_backend_rounds_round_trips_exactly() {
     let mut encoder = takeover_encoder();
     let mut verifier = Verifier::new();
     for len in [0usize, 1, 5, 4_095, 4_096, 4_097, 200_000] {

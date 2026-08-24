@@ -659,33 +659,42 @@ fn host_side_fragment_splitting_preserves_the_bytes() {
 /// compressor. Before the encoder gave the flush room to finish in one call, most
 /// large level-0 messages carried one.
 ///
-/// Level 0 is validity-only here, and the reason is a measurement rather than
-/// caution. zlib sizes each stored block from the output room it is handed, so a
-/// message whose *output* outgrows one round emits one more block header than an
-/// unbounded compressor would. No fixed room stops that — the first affected size
-/// tracks the room itself, measured at three ceilings — and removing it would mean
-/// reserving every message in full, taxing the compressible common case to tidy
-/// the incompressible one. The threshold is a function of the compressed size and
-/// not the input length, so pinning it here would duplicate the encoder's own
-/// arithmetic in a test. Level 0's bytes are pinned instead by RFC 7692 section
-/// 7.2.3.3 in `the_rfc_7692_vectors_are_reproduced_byte_for_byte` and by the
-/// same-arm routing comparison in
-/// `the_encoder_matches_direct_flate2_at_every_level`.
+/// Level 0 splits into two bands, and the split is the encoder's own room branch
+/// rather than a convenience. Below the ceiling the room is derived from the
+/// payload, and level 0 is byte-exact there — that band is the *only* place the
+/// encoder's framing margin is observable, because a flush that outgrows its room
+/// by even one octet appends a redundant block. Measured, the tightest case has 54
+/// octets of headroom out of 64, so the margin is load-bearing and this is what
+/// holds it.
 ///
-/// Nothing is lost by that: the redundant flush block this row exists to catch is
-/// produced by code every level shares, so a regression turns the levels 1
-/// through 9 rows red at every size.
+/// Above the ceiling the room is a constant, and zlib sizes each stored block from
+/// what it is handed, so a message whose output needs more than one round emits
+/// one more block header than an unbounded compressor would. No fixed room stops
+/// that — the first affected size tracks the room itself, measured at three
+/// ceilings — and removing it would mean reserving every message in full, taxing
+/// the compressible common case to tidy the incompressible one. Those sizes are
+/// validity-only, with level 0's bytes pinned instead by RFC 7692 section 7.2.3.3
+/// in `the_rfc_7692_vectors_are_reproduced_byte_for_byte` and by the same-arm
+/// routing comparison in `the_encoder_matches_direct_flate2_at_every_level`.
 ///
 /// Levels 1 through 9 are byte-identical at every size here, including the
 /// stored-block multiples and the sizes either side of the room ceiling, which is
 /// where the level-0 divergence lives.
 #[test]
 fn the_encoder_matches_a_differently_buffered_compressor() {
-    // Includes the maximal-stored-block multiples and sizes either side of the
-    // crate's per-round room ceiling, which is where the level-0 divergence lives.
+    // The encoder derives its room from the payload below this and uses a
+    // constant above it. Naming the branch boundary is not the same as restating
+    // the arithmetic behind it: below it, level 0 is byte-exact and is what holds
+    // the framing margin.
+    const PAYLOAD_ROOM_BAND: usize = 131_008;
+
+    // Three bands. The maximal-stored-block multiples and the sizes either side of
+    // the crate's per-round room ceiling, where the level-0 divergence lives; and
+    // zlib's 16,384-symbol literal buffer with its multiples, which is where the
+    // payload-derived room branch would show a residue larger than its margin.
     let sizes = [
-        1usize, 5, 4_096, 60_000, 65_534, 65_535, 65_536, 131_070, 131_071, 131_072, 131_073,
-        196_605, 200_000, 400_000,
+        1usize, 5, 4_096, 16_384, 16_448, 32_768, 60_000, 65_534, 65_535, 65_536, 98_304, 131_006,
+        131_007, 131_070, 131_071, 131_072, 131_073, 196_605, 200_000, 400_000,
     ];
     for level in 0..=9u32 {
         for len in sizes {
@@ -695,7 +704,7 @@ fn the_encoder_matches_a_differently_buffered_compressor() {
                 let config = EncoderConfig::new().compression_level(level).expect("zlib's domain");
                 let ours = send(&mut client_codecs(15, 15, false, config), &payload);
                 let reference = direct(level, 15, &payload);
-                if level > 0 {
+                if level > 0 || len <= PAYLOAD_ROOM_BAND {
                     assert_eq!(
                         ours.len(),
                         reference.len(),

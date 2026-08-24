@@ -53,11 +53,28 @@ const BLOCK_ROOM: usize = 1 << 17;
 /// ambiguous one. Enforced because the failure it prevents is silent.
 const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored block");
 
-/// Slack above a payload's own length for the octets DEFLATE adds to it.
+/// Slack above a payload's own length, for the room the completing flush needs.
 ///
-/// The widest case is level 0: a five-octet header per maximal stored block plus
-/// the flush's own empty block. Below the cap that is at most three blocks' worth
-/// -- 20 octets -- so 64 is the bound with room over.
+/// Not a bound on what DEFLATE adds to a message, which is the reading to avoid:
+/// zlib-rs at level 1 expands incompressible input by about 5.5%, so the output
+/// routinely exceeds `payload + 64` and level 0 is the *narrowest* case rather
+/// than the widest. The room never has to cover the output, because [`drive`]
+/// re-reserves every round -- a short room costs rounds, not octets. Only the
+/// call that *completes* the flush has to fit, and what it emits is bounded by
+/// what the backend still holds, not by the message.
+///
+/// So this is a measured bound on that residue rather than a derived one, and it
+/// is tight: at a 16,384-octet payload the completing flush emits 16,394 octets
+/// into 16,448 of room, 54 of the 64 spent. It is also load-bearing at level 0
+/// alone -- there the flush drains the whole stored message, so one octet short
+/// appends a redundant block, while at levels 1 through 9 the compressed residue
+/// leaves thousands of octets spare and the margin is unobservable.
+///
+/// `the_encoder_matches_a_differently_buffered_compressor` therefore asserts
+/// level 0 byte-exactly across this branch, which is what holds the number:
+/// dropping the margin to 8, or halving the request, turns it red with the
+/// redundant block's signature. [`BLOCK_ROOM`] and its assertion cover the other
+/// branch, where the flush can hold a whole maximal stored block.
 const FRAMING_MARGIN: usize = 64;
 
 /// Output room to request per round, for a message of this size.

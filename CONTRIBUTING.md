@@ -5,15 +5,6 @@ below describe what belongs in it and what a change has to pass before it lands.
 
 The repository is `odedlaz/ws-pmd-rs`.
 
-## Conduct
-
-**TODO — do not publish with this section unresolved.**
-
-<!-- Pending the maintainer's call on which code of conduct this project adopts. The Rust
-     Code of Conduct (https://www.rust-lang.org/policies/code-of-conduct) is the ecosystem
-     default and is what comparable crates adopt. Replace this with the chosen policy, or
-     with a link to a CODE_OF_CONDUCT.md file. -->
-
 ## Scope
 
 Version 0.1 is an RFC 7692 correctness component. It is **not** a general WebSocket
@@ -45,22 +36,11 @@ minor-version bump and evidence from the consumer adapters.
 
 ## Reporting a bug
 
-Open an issue on the repository. Access is currently limited to collaborators, so if you
-cannot reach the tracker, contact the maintainer directly.
+Open an issue on the repository.
 
 A useful report names the RFC section or the API contract you believe was violated, the
 headers or byte sequence that reproduce it, and which `flate2` backend the graph resolved —
 `cargo tree -e features` shows it, and behaviour alone does not.
-
-## Reporting a security issue
-
-Do not open a public issue for a vulnerability.
-
-**TODO — do not publish with this section unresolved.**
-
-<!-- Pending a staffed security-reporting path. This must name a private channel — a
-     security contact address, or GitHub private vulnerability reporting — and say what
-     response a reporter can expect. Publication is blocked until it does. -->
 
 ## Development
 

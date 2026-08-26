@@ -32,11 +32,16 @@ pub enum NegotiationError {
     #[error("permessage-deflate parameter has the wrong arity")]
     ParameterArity,
 
-    /// A response selected `permessage-deflate` more than once. RFC 6455 as
-    /// corrected by verified erratum EID 3433 lets a response split
-    /// `Sec-WebSocket-Extensions` across field lines, so the selections are
-    /// counted over the whole list: two on one line, and one on each of two
-    /// lines, both land here.
+    /// A response selected `permessage-deflate` more than once, seen from the
+    /// client. RFC 6455 section 4.2.2 item 6 builds a response split across
+    /// field lines and section 9.1 makes the split and combined forms
+    /// equivalent, so the selections are counted over the whole list: two on one
+    /// line, and one on each of two lines, both land here. Verified erratum EID
+    /// 3433 confirms it by replacing section 11.3.2's MUST NOT with a MAY;
+    /// without the erratum that paragraph still contradicts the two above.
+    ///
+    /// A server that finds duplication in the response it is about to emit gets
+    /// [`ResponseAltered`](Self::ResponseAltered), not this.
     #[error("permessage-deflate selected more than once")]
     DuplicateExtension,
 
@@ -51,11 +56,12 @@ pub enum NegotiationError {
     ServerWindowUnconfirmed,
 
     /// The response widened `server_max_window_bits` past the offered bound.
+    /// Client-only: only the side that made the offer knows the bound.
     #[error("server_max_window_bits exceeds the offered bound")]
     ServerWindowTooLarge,
 
     /// The response demanded a `client_max_window_bits` below 9, which is
-    /// narrower than any compressor this side can be built at.
+    /// narrower than any compressor the client can be built at.
     ///
     /// A *wider* response value is not an error. RFC 7692 section 7.1.2.2 makes
     /// the offered value a hint the server may ignore and puts no MUST NOT on a
@@ -68,8 +74,9 @@ pub enum NegotiationError {
     #[error("client_max_window_bits is below the 9-bit floor a compressor needs")]
     ClientWindowTooNarrow,
 
-    /// The response carried a valueless `client_max_window_bits`. The valueless
-    /// form is an offer-only signal; a response must state the chosen width.
+    /// The response carried a valueless `client_max_window_bits`, which only the
+    /// client observes. The valueless form is an offer-only signal; a response
+    /// must state the chosen width.
     #[error("client_max_window_bits must carry a value in a response")]
     ClientWindowValueless,
 
@@ -94,6 +101,12 @@ pub enum NegotiationError {
     /// The response that reached the serialization boundary is not byte-for-byte
     /// the selection handed to the host. Version 0.1 permits the exact proposal
     /// or removal, and nothing between.
+    ///
+    /// This is also the server's duplication route: a second `permessage-deflate`
+    /// element lands here rather than on
+    /// [`DuplicateExtension`](Self::DuplicateExtension), and it fires even where
+    /// every element matches the proposal byte for byte, because the count is
+    /// checked separately from the bytes.
     #[error("the final response is not the proposed selection")]
     ResponseAltered,
 

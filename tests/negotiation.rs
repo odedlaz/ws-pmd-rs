@@ -212,14 +212,13 @@ fn a_flag_parameter_may_not_carry_a_value() {
     assert_eq!(error, NegotiationError::ParameterArity);
 }
 
-/// `whole-list-first`. A single pass that validates as it selects passes this
-/// row: it takes the conforming first element and returns before it ever reads
-/// the second. Two passes are what the RFC asks for, and this is the row that
-/// tells them apart.
+/// `whole-list-first`. The guard is on the outcome, not on how many passes the
+/// implementation makes: a client that returns as soon as it finds a selectable
+/// element accepts this response, and the crate has to reject it.
 ///
 /// Both shapes, because a response may now split the field across lines: the
-/// two-pass property has to hold over the whole list and not only within the
-/// line that carries the selection.
+/// property has to hold over the whole list and not only within the line that
+/// carries the selection.
 #[test]
 fn a_malformed_element_after_a_valid_selection_still_fails_the_field() {
     for response in [
@@ -1000,10 +999,11 @@ fn a_rewritten_response_outranks_a_composition_conflict() {
 
 /// The ruling in one matrix: what decides a response is how many
 /// `permessage-deflate` selections it carries, not how many field lines carry
-/// them. Every split row here failed the handshake before, and the two that cost
-/// a conforming peer are the last selected row -- a selection sitting beside
-/// another extension on its own line, never read at all -- and the declined
-/// pair, where a plain decline was reported as an error.
+/// them. Every split row here failed the handshake before. What cost a
+/// conforming peer is the split selections, rejected before the selection was
+/// read, and the split decline, reported as an error rather than as no
+/// selection. The split duplicates failed before and still fail; only the cause
+/// moved.
 #[test]
 fn the_selection_count_decides_not_the_field_line_count() {
     let selected: &[&[&[u8]]] = &[
@@ -1015,7 +1015,7 @@ fn the_selection_count_decides_not_the_field_line_count() {
     ];
     for response in selected {
         client_round_trip(ClientConfig::new(), response)
-            .expect("one selection is legal however the field is split")
+            .expect("one selection is legal however the field is laid out")
             .expect("the server selected permessage-deflate");
     }
 
@@ -1046,8 +1046,8 @@ fn the_selection_count_decides_not_the_field_line_count() {
 /// does not rescue the field. Both cross-line rows reported the field-line count
 /// before that check was retired.
 ///
-/// The single-line row is the control: a conforming field keeps the same
-/// attribution, so the rows above are not reporting a shape.
+/// The single-line row is the control: the same fault on one field line keeps
+/// the same attribution, so the rows above are not reporting a shape.
 #[test]
 fn a_grammar_fault_on_any_response_field_line_is_reported() {
     let one_line = client_round_trip(ClientConfig::new(), &[b"permessage-deflate; ="])
@@ -1093,8 +1093,8 @@ fn the_server_checks_grammar_then_correspondence() {
         &[b"x-a", b"permessage-deflate", b"x-b"],
     ] {
         assert!(
-            finish(legal).expect("a split field is one list").is_some(),
-            "the proposal is unaltered however the response splits the field"
+            finish(legal).expect("the field is one list however it is laid out").is_some(),
+            "the proposal is unaltered however the response lays out the field"
         );
     }
 

@@ -16,8 +16,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 cargo package --locked --quiet --manifest-path "$root/Cargo.toml"
-tar -xzf "$root"/target/package/permessage-deflate-*.crate -C "$work"
-pkg=$(echo "$work"/permessage-deflate-*/)
+tar -xzf "$root"/target/package/ws-pmd-rs-*.crate -C "$work"
+pkg=$(echo "$work"/ws-pmd-rs-*/)
 [ -d "$pkg/src" ] || { echo "unpacked package has no src/: $pkg" >&2; exit 1; }
 
 failures=0
@@ -37,7 +37,7 @@ publish = false
 [workspace]
 
 [dependencies]
-permessage-deflate = { path = "$pkg"${ours} }
+ws-pmd-rs = { path = "$pkg"${ours} }
 http = "1"
 $flate2
 

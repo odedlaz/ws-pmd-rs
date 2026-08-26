@@ -20,7 +20,7 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "http",
- "permessage-deflate",
+ "ws-pmd-rs",
 ]
 
 [[package]]
@@ -103,15 +103,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "permessage-deflate"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "http",
- "thiserror",
-]
-
-[[package]]
 name = "pkg-config"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,3 +180,12 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "ws-pmd-rs"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "http",
+ "thiserror",
+]

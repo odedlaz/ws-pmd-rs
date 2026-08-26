@@ -51,15 +51,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "permessage-deflate"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "http",
- "thiserror",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,6 +112,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
+name = "ws-pmd-rs"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "http",
+ "thiserror",
+]
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -132,5 +132,5 @@ version = "0.0.0"
 dependencies = [
  "flate2",
  "http",
- "permessage-deflate",
+ "ws-pmd-rs",
 ]

@@ -14,7 +14,7 @@ publish = false
 [workspace]
 
 [dependencies]
-permessage-deflate = { path = "../..", default-features = false, features = ["zlib-rs"] }
+ws-pmd-rs = { path = "../..", default-features = false, features = ["zlib-rs"] }
 http = "1"
 
 # The scenario driver builds peer messages with flate2. No backend request, for

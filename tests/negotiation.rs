@@ -2,7 +2,7 @@
 #![expect(clippy::expect_used, clippy::unwrap_used, reason = "a panic is how a test reports")]
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-use permessage_deflate::{
+use ws_pmd_rs::{
     ClientConfig, ClientHandshake, ClientOffer, ConfigError, Negotiated, NegotiationError,
     PmdComposition, ServerConfig, ServerHandshake,
 };

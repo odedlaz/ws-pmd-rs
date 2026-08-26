@@ -1,6 +1,7 @@
 [package]
-name = "permessage-deflate"
+name = "ws-pmd-rs"
 description = "RFC 7692 permessage-deflate negotiation and DEFLATE codec, independent of any WebSocket implementation"
+repository = "https://github.com/odedlaz/ws-pmd-rs"
 categories = ["web-programming::websocket", "network-programming"]
 keywords = ["websocket", "permessage-deflate", "rfc7692", "compression"]
 license = "MIT"

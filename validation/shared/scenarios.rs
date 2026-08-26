@@ -9,7 +9,7 @@
 
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-use permessage_deflate::{
+use ws_pmd_rs::{
     ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, EncoderConfig,
     PmdComposition,
 };

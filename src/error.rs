@@ -56,7 +56,9 @@ pub enum NegotiationError {
     ServerWindowUnconfirmed,
 
     /// The response widened `server_max_window_bits` past the offered bound.
-    /// Client-only: only the side that made the offer knows the bound.
+    /// Client-only: a server checks its own outbound response for byte
+    /// correspondence -- [`ResponseAltered`](Self::ResponseAltered) -- and never
+    /// for this bound.
     #[error("server_max_window_bits exceeds the offered bound")]
     ServerWindowTooLarge,
 
@@ -75,7 +77,7 @@ pub enum NegotiationError {
     ClientWindowTooNarrow,
 
     /// The response carried a valueless `client_max_window_bits`, which only the
-    /// client observes. The valueless form is an offer-only signal; a response
+    /// client rejects. The valueless form is an offer-only signal; a response
     /// must state the chosen width.
     #[error("client_max_window_bits must carry a value in a response")]
     ClientWindowValueless,

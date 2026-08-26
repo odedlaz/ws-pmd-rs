@@ -1,9 +1,9 @@
-# Contributing to permessage-deflate
+# Contributing to ws-pmd-rs
 
 Thank you for wanting to help. This crate has a deliberately narrow job, and the sections
 below describe what belongs in it and what a change has to pass before it lands.
 
-The repository is `odedlaz/ws-pmd-rs`; the crate it publishes is `permessage-deflate`.
+The repository is `odedlaz/ws-pmd-rs`.
 
 ## Conduct
 

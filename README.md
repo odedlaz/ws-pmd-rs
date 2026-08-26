@@ -207,14 +207,13 @@ has to pass.
 
 ## Acknowledgements
 
-**TODO — do not publish with this section unresolved.**
+Portions of this crate's `Sec-WebSocket-Extensions` grammar, RFC 7692 negotiation, DEFLATE
+codec, and test fixtures derive from the `permessage-deflate` work in tungstenite-rs —
+authored by Alex Bakon based on work by Benjamin Swart — as carried in
+[Signal's fork](https://github.com/signalapp/tungstenite-rs).
 
-<!-- Pending the source-provenance answer from the people who wrote the extraction.
-     This crate grew out of work on tungstenite-rs, which is dual-licensed
-     MIT OR Apache-2.0 (Copyright 2017 Alexey Galakhov, Copyright 2016 Jason Housley).
-     Once it is settled how much source text is genuinely derived, this section carries the
-     attribution MIT requires for substantial portions, or is removed if none is owed.
-     Do not fill it in by guessing in either direction. -->
+tungstenite-rs is available under MIT OR Apache-2.0. This crate uses it under MIT and
+retains its copyright notices in [LICENSE](LICENSE).
 
 ## License
 

@@ -10,8 +10,13 @@ edition = "2021"
 rust-version = "1.85"
 
 # The named backend arms are development-only and must not ship in the package;
-# see validation/README.md.
-exclude = ["validation"]
+# see validation/README.md. The agent instructions go with them: they are
+# written for this repository, not for a caller, and every consumer downloads
+# them otherwise. `README.md` cannot be dropped here at all -- Cargo
+# force-includes the auto-detected readme, so removing it takes `readme = false`
+# *and* an entry in this list. Either alone still ships the file, and neither
+# warns.
+exclude = ["validation", "AGENTS.md", "CLAUDE.md"]
 
 # Activation requests, not exclusive guarantees. Cargo unions features across a
 # graph, so naming one here cannot stop a dependent from also turning the other

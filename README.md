@@ -1,4 +1,4 @@
-# permessage-deflate
+# ws-pmd-rs
 
 RFC 7692 `permessage-deflate` for Rust: extension negotiation and per-connection DEFLATE
 state, independent of any WebSocket implementation.
@@ -8,7 +8,8 @@ compression state that follows from the agreement. It owns nothing else. It has 
 no runtime, and no frame type, and it holds no opinion about masking, opcodes, close codes,
 UTF-8, or message assembly. Those stay with the host.
 
-The crate is `permessage-deflate`; the repository is `ws-pmd-rs`. They differ on purpose.
+The crate is `ws-pmd-rs`. Where this document writes `permessage-deflate` it means the RFC
+7692 extension token, not the crate.
 
 ## Status
 
@@ -21,7 +22,7 @@ Until it is published, depend on it by git reference:
 
 ```toml
 [dependencies]
-permessage-deflate = { git = "https://github.com/odedlaz/ws-pmd-rs" }
+ws-pmd-rs = { git = "https://github.com/odedlaz/ws-pmd-rs" }
 ```
 
 ## Scope
@@ -49,7 +50,7 @@ applies the response:
 
 ```rust
 use http::HeaderMap;
-use permessage_deflate::{ClientConfig, ClientOffer, PmdComposition};
+use ws_pmd_rs::{ClientConfig, ClientOffer, PmdComposition};
 
 let mut request = HeaderMap::new();
 let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
@@ -69,7 +70,7 @@ element, and commits only once that element has survived the host's own callback
 
 ```rust
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap};
-use permessage_deflate::{PmdComposition, ServerConfig, ServerHandshake};
+use ws_pmd_rs::{PmdComposition, ServerConfig, ServerHandshake};
 
 let Some(selection) = ServerHandshake::accept(ServerConfig::new(), &request)? else {
     // Nothing offered, or nothing this configuration can honour.
@@ -102,7 +103,7 @@ An agreement is consumed to produce the pair of codecs for that connection. `Neg
 neither `Copy` nor `Clone`, so one agreement cannot mint two sets of compression state.
 
 ```rust
-use permessage_deflate::{DecompressedLimit, EncoderConfig};
+use ws_pmd_rs::{DecompressedLimit, EncoderConfig};
 
 let (mut encoder, mut decoder) = negotiated.into_codecs(EncoderConfig::new());
 
@@ -206,14 +207,13 @@ has to pass.
 
 ## Acknowledgements
 
-**TODO — do not publish with this section unresolved.**
+Portions of this crate's `Sec-WebSocket-Extensions` grammar, RFC 7692 negotiation, DEFLATE
+codec, and test fixtures derive from the `permessage-deflate` work in tungstenite-rs —
+authored by Alex Bakon based on work by Benjamin Swart — as carried in
+[Signal's fork](https://github.com/signalapp/tungstenite-rs).
 
-<!-- Pending the source-provenance answer from the people who wrote the extraction.
-     This crate grew out of work on tungstenite-rs, which is dual-licensed
-     MIT OR Apache-2.0 (Copyright 2017 Alexey Galakhov, Copyright 2016 Jason Housley).
-     Once it is settled how much source text is genuinely derived, this section carries the
-     attribution MIT requires for substantial portions, or is removed if none is owed.
-     Do not fill it in by guessing in either direction. -->
+tungstenite-rs is available under MIT OR Apache-2.0. This crate uses it under MIT and
+retains its copyright notices in [LICENSE](LICENSE).
 
 ## License
 

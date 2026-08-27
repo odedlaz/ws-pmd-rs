@@ -35,10 +35,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: rustfmt
       - name: Root package
         run: cargo fmt --check
       - name: Independent workspaces
@@ -67,23 +63,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: clippy
-      - name: Select the axis
-        id: axis
-        run: |
-          case '${{ matrix.axis }}' in
-            default)      echo 'flags=' >> "$GITHUB_OUTPUT" ;;
-            all-targets)  echo 'flags=--all-targets' >> "$GITHUB_OUTPUT" ;;
-            all-features) echo 'flags=--all-features' >> "$GITHUB_OUTPUT" ;;
-            *) echo "unknown axis" >&2; exit 1 ;;
-          esac
       # `-D warnings` on the command line, not a manifest level: a warn-level
       # lint prints and still exits 0, so exit code alone is not zero findings.
+      # The axis names a whole command: expanding a flags variable into the
+      # shell would be both a template injection and an unquoted split.
       - name: Clippy
-        run: cargo clippy --locked ${{ steps.axis.outputs.flags }} -- -D warnings
+        env:
+          AXIS: ${{ matrix.axis }}
+        run: |
+          case "$AXIS" in
+            default)      cargo clippy --locked -- -D warnings ;;
+            all-targets)  cargo clippy --locked --all-targets -- -D warnings ;;
+            all-features) cargo clippy --locked --all-features -- -D warnings ;;
+            *) echo "::error::unknown clippy axis: $AXIS" >&2; exit 1 ;;
+          esac
 
   test:
     name: test
@@ -92,9 +85,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
       # `--all-targets` is not a substitute: it excludes doctests, and ten of
       # this crate's fifteen import sites are doctest lines under src/.
       - name: Test
@@ -109,9 +99,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
       # A plain `cargo doc` exits 0 on warnings, so the flags are the gate.
       - name: Document
         env:
@@ -127,9 +114,10 @@ jobs:
           persist-credentials: false
       # Exact, not a range: this proves the `rust-version` the manifest declares,
       # which compiling on current stable does not.
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: 1.85.0
+      - name: Rust 1.85.0
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal --no-self-update
+          rustup default 1.85.0
       - name: Test on the declared minimum
         env:
           RUSTFLAGS: -D warnings
@@ -142,9 +130,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
       - name: Package
         env:
           RUSTFLAGS: -D warnings
@@ -185,20 +170,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
-          components: clippy
       - name: Clippy
-        run: >-
-          cargo clippy --locked --all-targets
-          --manifest-path ${{ matrix.manifest }} -- -D warnings
+        env:
+          MANIFEST: ${{ matrix.manifest }}
+        run: cargo clippy --locked --all-targets --manifest-path "$MANIFEST" -- -D warnings
       - name: Test
         env:
+          MANIFEST: ${{ matrix.manifest }}
           RUSTFLAGS: -D warnings
-        run: >-
-          cargo test --locked --no-fail-fast
-          --manifest-path ${{ matrix.manifest }}
+        run: cargo test --locked --no-fail-fast --manifest-path "$MANIFEST"
 
   consumer-matrix:
     name: consumer-matrix
@@ -207,9 +187,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: stable
       - name: Seven external feature graphs against the packaged crate
         env:
           RUSTFLAGS: -D warnings
@@ -222,10 +199,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
-          components: clippy, rustfmt
+      - name: Rust ${{ env.FUZZ_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal \
+            --component clippy,rustfmt --no-self-update
+          rustup default "$FUZZ_TOOLCHAIN"
       # A fuzz target is repository code. Living in an independent workspace is
       # not a warning exemption.
       - name: Format
@@ -258,20 +236,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
-        with:
-          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Rust ${{ env.FUZZ_TOOLCHAIN }}
+        run: |
+          rustup toolchain install "$FUZZ_TOOLCHAIN" --profile minimal --no-self-update
+          rustup default "$FUZZ_TOOLCHAIN"
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}"
       # A five-minute smoke run per leg, not a claim of exhaustive fuzzing.
       - name: Fuzz
-        run: >-
-          cargo fuzz run ${{ matrix.target }}
-          --fuzz-dir fuzz
-          --no-default-features --features ${{ matrix.backend }}
-          --
-          -max_total_time=300 -max_len=65536 -timeout=10 -rss_limit_mb=2048
-          -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/
+        env:
+          TARGET: ${{ matrix.target }}
+          BACKEND: ${{ matrix.backend }}
+        run: |
+          cargo fuzz run "$TARGET" --fuzz-dir fuzz \
+            --no-default-features --features "$BACKEND" -- \
+            -max_total_time=300 -max_len=65536 -timeout=10 -rss_limit_mb=2048 \
+            -artifact_prefix="fuzz/artifacts/$TARGET/"
       - name: Upload crash artifacts
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -13,13 +13,19 @@ permissions:
 # Keyed by an identity that is stable for the event, so a rerun of the same PR,
 # merge group, or ref cancels its predecessor and nothing else. This cannot
 # cancel a differently named merge group and does not claim to.
+#
+# `main` is exempt from cancellation. Superseding a branch run costs nothing --
+# the answer wanted is about the tip -- but on `main` the question is "what did
+# this commit's gate say", and a cancelled run answers it for no commit. Three
+# consecutive pushes to `main` lost their verdict that way, one of them the only
+# completed red run we had.
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name }}-${{
       github.event.pull_request.number
       || github.event.merge_group.head_ref
       || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always

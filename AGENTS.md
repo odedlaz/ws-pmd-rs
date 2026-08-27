@@ -47,8 +47,16 @@ does not ship.
   sat in `Cargo.toml`, `src/`, `tests/` and all three docs — six sites for one sentence.
   When you correct one, grep the stem tree-wide and write down the sense of **every** hit:
   an unclassified hit reads exactly like an absent one, and the sweep's own output then
-  becomes the evidence it was checked. Then fix each site on its own terms. A qualification
-  that is load-bearing at one site is a false claim at a site that never rested on it.
+  becomes the evidence it was checked. The stem, not a phrase, and tree-wide, not over the
+  files you expect — comments here wrap, so a claim can straddle a line break where no
+  line-oriented match for the phrase will find it. Then fix each site on its own terms. A
+  qualification that is load-bearing at one site is a false claim at a site that never
+  rested on it.
+- **That sweep is itself an instrument, and it can examine nothing and report clean.** An
+  empty result licenses nothing until the pattern has matched a line you know contains the
+  thing: a pattern that matches nowhere looks exactly like a tree that holds nothing. Nor
+  may you reduce the hit list on a key that drops the line number — `sort -u -k2` merges
+  two real sites into one, and the count comes out *more* plausible rather than less.
 
 ## Claims you may not make
 

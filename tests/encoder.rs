@@ -32,9 +32,17 @@ const EMPTY_MESSAGE: &[u8] = &[0x00];
 ///
 /// `Sync` is deliberately not asserted. Nothing needs it, and promising it would
 /// be a semver commitment bought for nothing.
+///
+/// Called from a test rather than a `const _: () = require_send::<T>()`, which
+/// 1.85 -- the declared MSRV -- reads as dead code. Both forms are compile-time
+/// checks, so this fails the build, not the run, if a codec stops being `Send`.
 const fn require_send<T: Send>() {}
-const _: () = require_send::<Encoder>();
-const _: () = require_send::<Decoder>();
+
+#[test]
+fn both_codecs_are_send() {
+    require_send::<Encoder>();
+    require_send::<Decoder>();
+}
 
 // ---------------------------------------------------------------- the oracles
 

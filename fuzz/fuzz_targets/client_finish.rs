@@ -19,13 +19,13 @@ fuzz_target!(|data: &[u8]| {
         None => return,
     };
 
+    // Neither step reads `data`: a failure is a regression, not a finding.
+    // Returning instead made every input a silent success -- with the offer
+    // refused this target ran 6.8M iterations green, never reaching `finish`.
     let mut request = HeaderMap::new();
-    let Ok(offer) = ClientOffer::install(ClientConfig::new(), &mut request) else {
-        return;
-    };
-    let Ok(handshake) = offer.seal(&request) else {
-        return;
-    };
+    let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+        .expect("the default offer installs into an empty request");
+    let handshake = offer.seal(&request).expect("the sealed offer matches the request it wrote");
 
     let mut response = HeaderMap::new();
     for line in body.split(|b| *b == 0) {

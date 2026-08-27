@@ -21,9 +21,7 @@ use ws_pmd::{CodecError, DecompressedLimit};
 use ws_pmd_fuzz::{client_decoder, fragments};
 
 fuzz_target!(|data: &[u8]| {
-    let Some(mut decoder) = client_decoder() else {
-        return;
-    };
+    let mut decoder = client_decoder();
 
     // Mirrors the decoder's own accounting: a non-final fragment adds to the
     // message in progress, a final one ends it.

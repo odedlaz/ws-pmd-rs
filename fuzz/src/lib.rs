@@ -67,21 +67,28 @@ pub fn fragments(data: &[u8]) -> Vec<Fragment<'_>> {
 ///
 /// Shared with the corpus test: asserting that a seed reaches its advertised
 /// state means decoding it, and a binary cannot be imported.
+///
+/// # Panics
+///
+/// If any step of that handshake fails. None of them reads the fuzzer's input,
+/// so a failure is a regression rather than a finding, and each panic names its
+/// step. Returning `None` instead let the `decoder` target return before its
+/// first `decompress` call for every input and still report green.
 #[must_use]
-pub fn client_decoder() -> Option<Decoder> {
+pub fn client_decoder() -> Decoder {
     let mut request = HeaderMap::new();
-    let offer = ClientOffer::install(ClientConfig::new(), &mut request).ok()?;
+    let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+        .expect("the default offer installs into an empty request");
     let mut response = HeaderMap::new();
     response.append(SEC_WEBSOCKET_EXTENSIONS, HeaderValue::from_static("permessage-deflate"));
-    Some(
-        offer
-            .seal(&request)
-            .ok()?
-            .finish(&response, PmdComposition::Compatible)
-            .ok()??
-            .into_codecs(EncoderConfig::new())
-            .1,
-    )
+    offer
+        .seal(&request)
+        .expect("the sealed offer matches the request it wrote")
+        .finish(&response, PmdComposition::Compatible)
+        .expect("a bare `permessage-deflate` response is acceptable")
+        .expect("an accepted response yields an agreement")
+        .into_codecs(EncoderConfig::new())
+        .1
 }
 
 #[cfg(test)]

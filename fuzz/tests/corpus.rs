@@ -117,7 +117,7 @@ fn every_seed_reaches_the_state_it_is_named_for() {
     for expected in SEEDS {
         let data = seed(expected.name);
         let parsed = fragments(&data);
-        let mut decoder = client_decoder().expect("a decoder from a real handshake");
+        let mut decoder = client_decoder();
         let mut output = Vec::new();
         let mut error = None;
         for record in &parsed {

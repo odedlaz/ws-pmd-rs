@@ -14,7 +14,7 @@ when it makes a caller simpler — say so and stop, rather than implementing it.
 
 ## The gate
 
-No CI is configured. Run all of this locally before you claim a change is green.
+Run all of this locally before you claim a change is green. CI is authoritative.
 
 ```sh
 cargo fmt --check
@@ -69,8 +69,7 @@ does not ship.
 
 ## Claims you may not make
 
-This crate is unpublished, uses no CI, and is deployed nowhere. Do not write, in code, docs,
-commits, or pull requests:
+This crate is deployed nowhere. Do not write, in code, docs, commits, or pull requests:
 
 - Performance, overhead, ratio, or memory numbers without naming the **backend, the
   compression level, and the platform**. The two backends agree on semantics and never on

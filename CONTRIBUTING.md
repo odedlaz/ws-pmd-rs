@@ -47,8 +47,7 @@ headers or byte sequence that reproduce it, and which `flate2` backend the graph
 You need Rust 1.85 or newer; that is the minimum this crate supports, and raising it is a
 breaking change.
 
-There is no continuous integration configured for this repository, so the gate below is
-yours to run. Run all of it before opening a pull request.
+Run all of this locally before opening a pull request. CI is authoritative.
 
 ```sh
 cargo fmt --check

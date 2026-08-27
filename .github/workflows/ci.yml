@@ -322,10 +322,16 @@ jobs:
           echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -version
-      # No -ignore expressions. Ubuntu ships ShellCheck on PATH, so `run:` bodies
-      # are checked too.
+      # No -ignore expressions. Ubuntu ships ShellCheck, and actionlint shells out
+      # to it for every `run:` body -- but when it is missing actionlint drops
+      # that half of the check and still exits 0. On a workflow whose script
+      # ShellCheck flags twice, actionlint exits 1 with it on PATH and 0 without,
+      # silently. So the version is printed first: unpiped, because this file's
+      # default shell has no `pipefail` and `| head` would swallow the 127.
       - name: Lint
-        run: ./actionlint -color
+        run: |
+          shellcheck --version
+          ./actionlint -color
 
   zizmor:
     name: zizmor

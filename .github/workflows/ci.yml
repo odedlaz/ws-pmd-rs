@@ -219,9 +219,11 @@ jobs:
       # not a warning exemption.
       - name: Format
         run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+      # `--locked` because `fuzz/Cargo.lock` is tracked: without it a stale or
+      # broken lockfile re-resolves quietly instead of failing the job.
       - name: Clippy
         run: >-
-          cargo clippy --manifest-path fuzz/Cargo.toml
+          cargo clippy --locked --manifest-path fuzz/Cargo.toml
           --all-targets --all-features -- -D warnings
       # `clippy --all-targets` compiles the corpus assertions without running
       # them, which would leave the thing that proves the corpus is not vacuous

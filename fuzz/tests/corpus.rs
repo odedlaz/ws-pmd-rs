@@ -70,8 +70,47 @@ const SEEDS: &[Expected] = &[
     Expected { name: "zero-limit", records: &[(HELLO, true, 0)], outcome: Outcome::OverCeiling },
 ];
 
+const CORPUS: &str = "corpus/decoder";
+
 fn corpus_dir() -> String {
-    format!("{}/corpus/decoder", env!("CARGO_MANIFEST_DIR"))
+    format!("{}/{CORPUS}", env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The seeds the repository carries, asked of git rather than of the directory.
+///
+/// `cargo fuzz run` writes its discoveries into this folder, so reading the
+/// directory turned the assertion below red after any local fuzzing session --
+/// during the workflow it exists to support. CI's population is this one either
+/// way: a runner checks out tracked files and nothing else.
+///
+/// Every failure panics rather than returning an empty vector. An empty
+/// population satisfies a set comparison against an empty table, which is the
+/// instrument-that-examines-nothing this file exists to catch.
+fn tracked_seeds() -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "ls-files", "-z", "--", CORPUS])
+        .output()
+        .expect("git ls-files runs");
+    assert!(
+        output.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let listing = std::str::from_utf8(&output.stdout).expect("git ls-files emits utf-8 paths");
+    let prefix = format!("{CORPUS}/");
+    let mut names: Vec<String> = listing
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            path.strip_prefix(&prefix)
+                .filter(|name| !name.contains('/'))
+                .unwrap_or_else(|| panic!("unexpected path under {CORPUS}: {path}"))
+                .to_owned()
+        })
+        .collect();
+    assert!(!names.is_empty(), "git reports no tracked seed under {CORPUS}");
+    names.sort();
+    names
 }
 
 fn seed(name: &str) -> Vec<u8> {
@@ -79,18 +118,13 @@ fn seed(name: &str) -> Vec<u8> {
     std::fs::read(&path).unwrap_or_else(|e| panic!("corpus seed {path}: {e}"))
 }
 
-/// Enumerated from the filesystem rather than from `SEEDS`, so a seed added
+/// Enumerated from the repository rather than from `SEEDS`, so a seed committed
 /// later cannot sit in the corpus with nothing asserting it.
 #[test]
 fn every_corpus_seed_has_an_expectation() {
-    let mut on_disk: Vec<String> = std::fs::read_dir(corpus_dir())
-        .expect("corpus directory")
-        .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
-        .collect();
-    on_disk.sort();
     let mut expected: Vec<String> = SEEDS.iter().map(|s| s.name.to_owned()).collect();
     expected.sort();
-    assert_eq!(on_disk, expected, "the corpus and the expectation table disagree");
+    assert_eq!(tracked_seeds(), expected, "the corpus and the expectation table disagree");
 }
 
 #[test]

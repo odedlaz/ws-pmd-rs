@@ -14,32 +14,15 @@ when it makes a caller simpler — say so and stop, rather than implementing it.
 
 ## The gate
 
-Run all of this locally before you claim a change is green. CI is authoritative.
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) is the gate and its only exhaustive
+statement — the commands, the flags, the matrices, the tool versions, and what `ci-passed`
+requires. Read it and run what your change touches before you call the change green. A green
+local subset is not `ci-passed`; CI is authoritative.
 
-```sh
-cargo fmt --check
-cargo clippy --locked
-cargo clippy --locked --all-targets
-cargo clippy --locked --all-features
-cargo test --locked --no-fail-fast
-```
-
-The three clippy runs widen over different axes — default production code, targets,
-features — and none subsumes another. `--no-fail-fast` keeps a failing binary from hiding
-the ones after it.
-
-Backend-dependent behaviour is not in that suite, which is backend-independent by design:
-
-```sh
-cargo test --manifest-path validation/zlib-rs-arm/Cargo.toml
-cargo test --manifest-path validation/c-zlib-arm/Cargo.toml
-./validation/consumer-matrix/run.sh
-```
-
-**Run the two arms separately.** Cargo features are additive and unify per build, so
-building them together gives both arms the C backend, and the zlib-rs arm stops testing
-what it is named for. Read `validation/README.md` before editing anything under
-`validation/`; the fixture properties it describes are load-bearing.
+Backend-dependent behaviour is not in the crate's suite, which is backend-independent by
+design. Read `validation/README.md` before editing anything under `validation/`: it owns the
+two named arms, the consumer matrix, and the fixture properties they rest on, including why
+the two arms must run separately.
 
 `validation/` is excluded from the published package, and the consumer matrix builds the
 *packaged* crate rather than this worktree — a path dependency would test files the package

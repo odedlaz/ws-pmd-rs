@@ -47,37 +47,16 @@ headers or byte sequence that reproduce it, and which `flate2` backend the graph
 You need Rust 1.85 or newer; that is the minimum this crate supports, and raising it is a
 breaking change.
 
-Run all of this locally before opening a pull request. CI is authoritative.
-
-```sh
-cargo fmt --check
-cargo clippy --locked                 # production code, default features — the gate
-cargo clippy --locked --all-targets   # adds the test targets
-cargo clippy --locked --all-features  # adds the non-default backend feature
-cargo test --locked --no-fail-fast    # --no-fail-fast so no later test binary is skipped
-```
-
-None of the three clippy runs replaces another. They widen over different axes — the first
-sees production code under the default features, the second adds every target, the third
-adds every feature — so all three must be clean.
+[`.github/workflows/ci.yml`](https://github.com/odedlaz/ws-pmd-rs/blob/main/.github/workflows/ci.yml)
+is the gate, and the only exhaustive statement of it: the commands, the flags, the feature
+and backend matrices, the tool versions, and what `ci-passed` requires. Running it needs a
+clone, because it reaches `validation/` and `fuzz/` and neither is in the published package.
 
 Compression-backend behaviour cannot be asserted by the crate's own suite, which is
 backend-independent by design. Two named arms cover it, plus a matrix that consumes the
-*packaged* crate from outside:
-
-```sh
-cargo test --manifest-path validation/zlib-rs-arm/Cargo.toml
-cargo test --manifest-path validation/c-zlib-arm/Cargo.toml
-./validation/consumer-matrix/run.sh
-```
-
-**Run the two arms separately.** Cargo features are additive and unify per build, so
-building them together gives both arms the C backend, and the zlib-rs arm silently stops
-testing what it is named for. Read [`validation/README.md`](validation/README.md) before
-changing anything under `validation/`; the properties those fixtures rest on are
-load-bearing and are written down there.
-
-The `validation/` directory is excluded from the published package.
+*packaged* crate from outside. Read [`validation/README.md`](validation/README.md) before
+changing anything under `validation/`: it owns those commands and the properties they rest
+on, including why the two arms must run separately.
 
 ## Tests
 

@@ -135,7 +135,9 @@ fn decoder_for(response: &str) -> Decoder {
 fn feed(decoder: &mut Decoder, wire: &[u8], expected: &[u8]) -> Outcome {
     match decoder.decompress(wire, true, ROOMY) {
         Ok(bytes) if bytes == expected => Outcome::Exact,
-        Ok(bytes) => Outcome::Wrong(format!("{} bytes, not the {} sent", bytes.len(), expected.len())),
+        Ok(bytes) => {
+            Outcome::Wrong(format!("{} bytes, not the {} sent", bytes.len(), expected.len()))
+        }
         Err(error) => Outcome::Rejected(error),
     }
 }
@@ -144,7 +146,11 @@ fn feed(decoder: &mut Decoder, wire: &[u8], expected: &[u8]) -> Outcome {
 fn fresh(declared: u8, gap: usize) -> Outcome {
     let plain = far_reference_payload(gap);
     let wire = peer_message(&plain, 15);
-    feed(&mut decoder_for(&format!("permessage-deflate; server_max_window_bits={declared}")), &wire, &plain)
+    feed(
+        &mut decoder_for(&format!("permessage-deflate; server_max_window_bits={declared}")),
+        &wire,
+        &plain,
+    )
 }
 
 /// The same, but after the no-context-takeover reinitialisation has run: one
@@ -210,7 +216,8 @@ fn stream_starts_that_broke_the_premise() -> Vec<String> {
             if inflater.total_out() == 0 {
                 broken.push(format!("{at}: produced nothing, so it measures nothing"));
             } else if inflater.total_in() == 0 {
-                broken.push(format!("{at}: produced {} with nothing consumed", inflater.total_out()));
+                broken
+                    .push(format!("{at}: produced {} with nothing consumed", inflater.total_out()));
             }
         }
     }

@@ -496,10 +496,8 @@ fn rfc_7692_7_2_3_4_an_empty_bfinal_message_decodes() {
 
 /// A message that refills the scratch buffer many times over, which is what
 /// reproduces the abort in the `flate2` versions `Cargo.toml` excludes,
-/// whenever one of them is the backend resolved. It does not defend that floor:
-/// as `Cargo.toml` records, the locked gate resolves the `Cargo.lock` entry
-/// whatever the declared requirement says, so what excludes those versions is
-/// the requirement itself.
+/// whenever one of them is the backend resolved. It does not defend that
+/// floor; the comment on that requirement in `Cargo.toml` says what does.
 #[test]
 fn a_message_spanning_many_scratch_refills_decodes() {
     let payload: Vec<u8> =

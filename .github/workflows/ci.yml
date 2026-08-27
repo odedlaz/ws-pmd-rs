@@ -218,6 +218,29 @@ jobs:
         run: >-
           cargo clippy --manifest-path fuzz/Cargo.toml
           --all-targets --all-features -- -D warnings
+      # `clippy --all-targets` compiles the corpus assertions without running
+      # them, which would leave the thing that proves the corpus is not vacuous
+      # unexecuted -- the defect it exists to catch, one level up. This job is
+      # where it belongs rather than beside `fuzz`, because the matrix already
+      # declares `needs: [fuzz-lint]`, so a rotten corpus stops the expensive
+      # rows instead of running next to them.
+      #
+      # One named backend, deliberately not the `--all-features` of the step
+      # above. Both features together forward `flate2/zlib-rs` *and*
+      # `flate2/zlib`, and nothing in this tree then decides which is live --
+      # flate2's own precedence does. The comment above the feature table exists
+      # to stop exactly that. Every assertion here was run under `zlib-rs`
+      # alone, `zlib` alone, and both, with identical results, so the flag is
+      # not load-bearing today; it is what it licenses once anything under
+      # `fuzz/tests/` touches the codec.
+      #
+      # Not narrowed with `--test corpus` either: a target-scoped recipe stops
+      # running a second test target the day someone adds one.
+      - name: Corpus assertions
+        env:
+          RUSTFLAGS: -D warnings
+        run: >-
+          cargo test --locked --manifest-path fuzz/Cargo.toml --features zlib-rs
 
   fuzz:
     name: fuzz (${{ matrix.target }}, ${{ matrix.backend }})

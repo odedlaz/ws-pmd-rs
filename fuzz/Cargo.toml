@@ -14,7 +14,6 @@ edition = "2021"
 cargo-fuzz = true
 
 [dependencies]
-arbitrary = { version = "1", features = ["derive"] }
 http = "1"
 libfuzzer-sys = "0.4"
 
@@ -29,6 +28,11 @@ default-features = false
 [features]
 zlib-rs = ["ws-pmd/zlib-rs"]
 zlib = ["ws-pmd/zlib"]
+
+# The record parser is shared by the `decoder` target and by the corpus test,
+# and a binary cannot be imported by either.
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "server_accept"

@@ -1,9 +1,11 @@
 //! `Decoder::decompress` over arbitrary fragment sequences and ceilings.
 //!
 //! `DecompressedLimit` is a decompression-bomb guard, which makes it the one
-//! surface here where an adversarial generator is worth more than a test. The
-//! decoder is built through a real client handshake so the agreement under test
-//! is one negotiation produced.
+//! surface here where an adversarial generator is worth more than a test.
+//!
+//! The fragment records come from `ws_pmd_fuzz::fragments`, which documents the
+//! format and why it is written out rather than derived. `tests/corpus.rs`
+//! pins what each named seed decodes to.
 //!
 //! Two contracts are asserted rather than merely exercised, because a decoder
 //! that silently breaks either still returns `Ok`:
@@ -14,48 +16,11 @@
 
 #![no_main]
 
-use arbitrary::{Arbitrary, Unstructured};
-use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use libfuzzer_sys::fuzz_target;
-use ws_pmd::{
-    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, EncoderConfig,
-    PmdComposition,
-};
-
-/// The plan's ceiling on generated limits: high enough that an ordinary message
-/// is not clipped, low enough that a bomb is still bounded inside the run.
-const MAX_LIMIT: usize = 1 << 20;
-/// The plan's ceiling on one fragment, matching libFuzzer's `-max_len`.
-const MAX_FRAGMENT: usize = 64 * 1024;
-
-#[derive(Arbitrary, Debug)]
-struct Fragment {
-    bytes: Vec<u8>,
-    final_fragment: bool,
-    limit: usize,
-}
-
-fn client_decoder() -> Option<Decoder> {
-    let mut request = HeaderMap::new();
-    let offer = ClientOffer::install(ClientConfig::new(), &mut request).ok()?;
-    let mut response = HeaderMap::new();
-    response.append(SEC_WEBSOCKET_EXTENSIONS, HeaderValue::from_static("permessage-deflate"));
-    Some(
-        offer
-            .seal(&request)
-            .ok()?
-            .finish(&response, PmdComposition::Compatible)
-            .ok()??
-            .into_codecs(EncoderConfig::new())
-            .1,
-    )
-}
+use ws_pmd::{CodecError, DecompressedLimit};
+use ws_pmd_fuzz::{client_decoder, fragments};
 
 fuzz_target!(|data: &[u8]| {
-    let mut unstructured = Unstructured::new(data);
-    let Ok(fragments) = Vec::<Fragment>::arbitrary(&mut unstructured) else {
-        return;
-    };
     let Some(mut decoder) = client_decoder() else {
         return;
     };
@@ -65,12 +30,13 @@ fuzz_target!(|data: &[u8]| {
     let mut delivered = 0usize;
     let mut poisoned = false;
 
-    for fragment in fragments {
-        let limit = fragment.limit % (MAX_LIMIT + 1);
-        let bytes = &fragment.bytes[..fragment.bytes.len().min(MAX_FRAGMENT)];
-
-        let result =
-            decoder.decompress(bytes, fragment.final_fragment, DecompressedLimit::bytes(limit));
+    for fragment in fragments(data) {
+        let limit = fragment.limit;
+        let result = decoder.decompress(
+            fragment.bytes,
+            fragment.final_fragment,
+            DecompressedLimit::bytes(limit),
+        );
 
         if poisoned {
             assert!(

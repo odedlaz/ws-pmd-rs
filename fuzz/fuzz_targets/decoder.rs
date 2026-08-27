@@ -12,7 +12,10 @@
 //!
 //! * the cumulative output of a message never exceeds the ceiling supplied on
 //!   the call that produced it, and
-//! * the first error poisons the decoder, so every later call fails.
+//! * the first error poisons the decoder, so every later call fails. That one
+//!   is probed with a call of the harness's own, because leaving it to whether
+//!   the input carries another record leaves it unchecked whenever the error
+//!   lands on the last one -- which is every erroring seed in the corpus.
 
 #![no_main]
 
@@ -50,7 +53,14 @@ fuzz_target!(|data: &[u8]| {
                 assert!(total <= limit, "message reached {total} bytes past a ceiling of {limit}");
                 delivered = if fragment.final_fragment { 0 } else { total };
             }
-            Err(_) => poisoned = true,
+            Err(_) => {
+                let after = decoder.decompress(&[], true, DecompressedLimit::bytes(limit));
+                assert!(
+                    matches!(after, Err(CodecError::Poisoned)),
+                    "the first error left the decoder usable"
+                );
+                poisoned = true;
+            }
         }
     }
 });

@@ -53,13 +53,18 @@ jobs:
           cargo fmt --manifest-path validation/zlib-rs-arm/Cargo.toml --check
           cargo fmt --manifest-path validation/c-zlib-arm/Cargo.toml --check
           cargo fmt --manifest-path fuzz/Cargo.toml --check
-      # Sources no manifest owns. `cargo fmt` walks targets, so a file that is
-      # `include!`d by a generated consumer is reached by no manifest here and
-      # would go unformatted forever.
-      - name: Sources outside every manifest
+      # `cargo fmt` walks a manifest's targets, so a file that is `include!`d by
+      # a generated consumer is reached by no manifest above. Naming those files
+      # is how `validation/consumer-matrix/probe.rs` went unformatted: two were
+      # listed and the third was not. Ask git for the population instead, so a
+      # source added later cannot fall outside it. Every manifest in this tree is
+      # edition 2021, and the overlap with the steps above costs a second.
+      - name: Every tracked Rust source
         run: |
-          rustfmt --edition 2021 --check validation/shared/scenarios.rs
-          rustfmt --edition 2021 --check validation/consumer-matrix/public_api.rs
+          count=$(git ls-files '*.rs' | wc -l | tr -d '[:space:]')
+          echo "rustfmt over $count tracked sources"
+          test "$count" -gt 0
+          git ls-files -z '*.rs' | xargs -0 rustfmt --edition 2021 --check
 
   clippy:
     name: clippy (${{ matrix.axis }})

@@ -15,7 +15,8 @@ rust-version = "1.85"
 # consumer downloads them otherwise. `CONTRIBUTING.md` joins them: the gate it
 # documents needs a clone, and the paths it names -- `validation/`, `.github/`
 # -- are excluded here too, so a tarball reader would get a guide to files that
-# are absent. `README.md` cannot be dropped here at all -- Cargo
+# are absent, and `.semgrepignore` configures the scanner for this tree only.
+# `README.md` cannot be dropped here at all -- Cargo
 # force-includes the auto-detected readme, so removing it takes `readme = false`
 # *and* an entry in this list. Either alone still ships the file, and neither
 # warns.
@@ -26,6 +27,7 @@ exclude = [
     "AGENTS.md",
     "CLAUDE.md",
     "CONTRIBUTING.md",
+    ".semgrepignore",
 ]
 
 # Activation requests, not exclusive guarantees. Cargo unions features across a

@@ -140,7 +140,7 @@ jobs:
         run: |
           listing=$(cargo package --locked --list)
           printf '%s\n' "$listing"
-          for unwanted in .github/ fuzz/ validation/ AGENTS.md CLAUDE.md CONTRIBUTING.md; do
+          for unwanted in .github/ fuzz/ validation/ AGENTS.md CLAUDE.md CONTRIBUTING.md .semgrepignore; do
             if printf '%s\n' "$listing" | grep -q "^${unwanted}"; then
               echo "::error::${unwanted} is in the published archive" >&2
               exit 1
@@ -361,11 +361,35 @@ jobs:
           fi
       # --error and --strict make findings and malformed rules a failure.
       # --disable-nosem makes suppressed findings visible.
+      #
+      # The population is asserted rather than assumed, because this step
+      # reported clean over 15 of the crate's 20 Rust files: opengrep's built-in
+      # ignore list drops every `tests/` directory, so `tests/` and
+      # `validation/*/tests/` were named as roots here and never examined. The
+      # root `.semgrepignore` replaces that list, and the comparison below is
+      # what notices if anything leaves the population again. It is against
+      # every tracked `.rs` in the tree rather than only these four roots, so a
+      # Rust file added outside them fails here instead of going unscanned.
+      #
+      # No committed regression fixture is available for the pack's own rule:
+      # `Cargo.toml` sets `unsafe_code = "forbid"`, so an `unsafe-usage` fixture
+      # cannot live in this tree in any form. The pack's own fixture is the
+      # known-positive and the qualify step above is where it runs.
       - name: Scan this crate's Rust roots
-        run: >-
-          ./opengrep scan --error --strict --disable-nosem
-          --config .opengrep-rules/rust/lang/security
-          src tests validation fuzz
+        run: |
+          status=0
+          ./opengrep scan --error --strict --disable-nosem \
+            --config .opengrep-rules/rust/lang/security \
+            --json-output=scan.json \
+            src tests validation fuzz || status=$?
+          git ls-files -- '*.rs' | sort > tracked.txt
+          jq -r '.paths.scanned[]' scan.json | grep '\.rs$' | sort > scanned.txt || true
+          echo "tracked Rust files: $(wc -l < tracked.txt), scanned: $(wc -l < scanned.txt)"
+          if ! diff -u tracked.txt scanned.txt; then
+            echo "::error::the scan population is not the tracked Rust files" >&2
+            exit 1
+          fi
+          exit "$status"
       # --disable-nosem reveals a suppressed finding; it does not fail merely
       # because the suppression text is there. This is what enforces the policy.
       - name: No inline suppressions

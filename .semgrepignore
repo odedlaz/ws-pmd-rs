@@ -1,0 +1,18 @@
+# Read *instead of* opengrep's built-in ignore list, not in addition to it.
+# That is why this file exists: the built-in list drops every `tests/`
+# directory, which cut this crate's scan from 20 Rust files to 15 -- `tests/`
+# and `validation/*/tests/` were never examined and the job still reported
+# clean. Measured on opengrep 1.28.0: 15 scanned without this file, 20 with it.
+# Keep it minimal; every line here removes something from the scan.
+
+# The rule pack's ten deliberately-vulnerable fixtures are kept out of the
+# population by the nested `.git` that `actions/checkout` leaves in it, not by
+# this line. The line covers the day the pack arrives without one -- vendored,
+# or fetched as a tarball -- where a flat copy measurably adds 20 findings and
+# fails the scan for a reason that has nothing to do with this crate.
+.opengrep-rules/
+
+# Mirrors .gitignore. The population is asserted against *tracked* Rust files,
+# so any generated `.rs` under a build directory would fail the count rather
+# than be scanned as ours.
+target/

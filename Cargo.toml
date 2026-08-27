@@ -55,11 +55,12 @@ thiserror = "2"
 # `a_message_spanning_many_scratch_refills_decodes` is the row that reproduces
 # it whenever that backend is the one resolved.
 #
-# That row does not defend this number, though. The locked gate resolves the
-# `Cargo.lock` entry whatever the declared requirement says, so lowering the
-# floor leaves the suite green. What excludes the aborting versions is this
-# requirement itself, and only a resolver asked for minimum versions would
-# exercise it -- a lane 0.1 does not carry.
+# That row does not defend this number, though. The gate runs the suite with
+# `--locked`, so cargo resolves the `Cargo.lock` entry whatever the declared
+# requirement says, and lowering the floor leaves the suite green. What
+# excludes the aborting versions is this requirement itself, and only a
+# resolver asked for minimum versions would exercise it -- a lane 0.1 does
+# not carry.
 [dependencies.flate2]
 version = "1.0.31"
 default-features = false
@@ -81,13 +82,15 @@ default-features = false
 missing_docs = "warn"
 unsafe_code = "forbid"
 
-# Three invocations, and none replaces another. `cargo clippy --locked` is the
-# gate, and it sees production code under the default features only.
-# `--all-targets` is a superset over targets: it is what caught four
-# `similar_names` in `tests/codec.rs` that the gate by itself cannot see.
+# Three clippy invocations, and none replaces another. The default axis is
+# `cargo clippy --locked`: production code under the default features only, and
+# the only one that proves a pure consumer's resolve, immune to dev-dependency
+# feature unification. `--all-targets` is a superset over targets -- it caught
+# four `similar_names` in `tests/codec.rs` that the default axis cannot see.
 # `--all-features` is a superset over features, and it became a distinct command
-# the moment this manifest grew a `[features]` table -- before that it was the
-# same run as the gate.
+# the moment this manifest grew a `[features]` table; before that it was the same
+# run as the default axis. All three run in `.github/workflows/ci.yml`, which is
+# the gate.
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }

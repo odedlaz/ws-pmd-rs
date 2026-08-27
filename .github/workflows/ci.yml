@@ -67,7 +67,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # None of the three contains another; Cargo.toml's [lints.clippy]
+        # None of the three replaces another; Cargo.toml's [lints.clippy]
         # comment says why.
         axis: [default, all-targets, all-features]
     steps:

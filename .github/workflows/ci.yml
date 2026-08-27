@@ -328,6 +328,8 @@ jobs:
       # no rules is indistinguishable from a clean codebase, so the pack is
       # counted and then proved to fire before its silence is believed.
       - name: Qualify the rule pack
+        env:
+          KNOWN_POSITIVE: opengrep-rules.rust.lang.security.unsafe-usage
         run: |
           rules=.opengrep-rules/rust/lang/security
           count=$(find "$rules" -name '*.yml' | wc -l)
@@ -342,9 +344,19 @@ jobs:
           # match nothing. No --error here -- a finding is the expected result.
           ./opengrep scan --strict --json --config "$rules" \
             "$rules/unsafe-usage.rs" > qualify.json
-          if ! grep -q '"unsafe-usage"' qualify.json; then
-            echo "::error::the pack did not report unsafe-usage on its own fixture" >&2
-            cat qualify.json >&2
+          # Printed on success too. A qualification that only speaks when it
+          # fails records nothing on the run that is supposed to carry the
+          # evidence.
+          jq '{reported_ids: [.results[].check_id], parser_errors: .errors,
+               skipped_rules: .skipped_rules}' qualify.json
+          # The full namespaced ID, read out of results[]. A substring test for
+          # `unsafe-usage` also matches paths.scanned, which names the fixture
+          # whether or not the rule fired, so it would pass on zero findings.
+          if ! jq --exit-status --arg id "$KNOWN_POSITIVE" \
+               '.errors == [] and .skipped_rules == []
+                and ([.results[].check_id] | index($id) != null)' \
+               qualify.json > /dev/null; then
+            echo "::error::the pinned pack did not parse cleanly and report $KNOWN_POSITIVE on its own fixture" >&2
             exit 1
           fi
       # --error and --strict make findings and malformed rules a failure.

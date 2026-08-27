@@ -118,9 +118,10 @@ let message = decoder.decompress(fragment, is_final, DecompressedLimit::bytes(1 
 
 Two things about the sending side are easy to miss, and both are deliberate.
 
-RFC 7692 §7.2.1 defines the producer as operating on a *complete* message, so
-`prepare_message` takes a whole message and the host splits the result into frames. The
-alternative strategy — one encoder call per fragment — is a different algorithm, and this
+RFC 7692 §7.2.1 permits two ways to build fragments: split the result of compressing the
+whole message, or build each fragment from the payload available so far. `prepare_message`
+implements the first, so it takes a whole message and the host splits the result into
+frames. The second — one encoder call per fragment — is a different algorithm, and this
 API cannot enter it.
 
 `PreparedMessage` is a transaction. Preparing a message moves the compressor out of the

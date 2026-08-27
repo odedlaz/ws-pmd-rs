@@ -3,12 +3,15 @@
 //!
 //! RFC 7692 section 7.2.1 defines the producer side as three steps over a
 //! *complete* message: deflate it, end it with an empty uncompressed block, then
-//! remove that block's four trailing octets. The same section says an endpoint
-//! "fragments a compressed message by splitting the result of running this
-//! algorithm", so a complete-message encoder is the conforming shape and the
-//! host owns framing. The adjacent MUST NOT -- that `00 00 ff ff` is not removed
-//! from non-final fragments -- governs the other strategy, where a host calls an
-//! encoder once per fragment. Nothing here can enter it.
+//! remove that block's four trailing octets. The same section permits two ways
+//! to build fragments. This module implements the first: an endpoint "fragments
+//! a compressed message by splitting the result of running this algorithm", so
+//! the encoder takes a whole message and the host owns framing. In the second,
+//! "even when only part of the payload is available, a fragment can be built by
+//! compressing the available data" and byte-aligning its end; that is the
+//! strategy the adjacent MUST NOT governs, keeping `00 00 ff ff` on every
+//! non-final fragment. It is a different algorithm, and nothing here can
+//! enter it.
 //!
 //! Compression history is the peer's problem as much as ours, so a candidate
 //! that may not reach the wire cannot be produced and forgotten. Preparing a

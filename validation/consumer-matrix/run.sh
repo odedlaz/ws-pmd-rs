@@ -16,8 +16,23 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 cargo package --locked --quiet --manifest-path "$root/Cargo.toml"
-tar -xzf "$root"/target/package/ws-pmd-rs-*.crate -C "$work"
-pkg=$(echo "$work"/ws-pmd-rs-*/)
+
+# `cargo package` never clears target/package/, and a prefix glob is not a name:
+# `ws-pmd-*` also matches a stale `ws-pmd-rs-*` from before the rename. Unpacking
+# whichever the shell expands first would validate the wrong package and report
+# green, so resolve to exactly one tarball and name the others.
+shopt -s nullglob
+crates=("$root"/target/package/ws-pmd-*.crate)
+shopt -u nullglob
+if [ "${#crates[@]}" -ne 1 ]; then
+    printf 'expected exactly one packaged crate, found %d:\n' "${#crates[@]}" >&2
+    printf '  %s\n' "${crates[@]}" >&2
+    printf 'remove stale tarballs from %s/target/package/ and re-run\n' "$root" >&2
+    exit 1
+fi
+
+tar -xzf "${crates[0]}" -C "$work"
+pkg="$work/$(basename "${crates[0]}" .crate)"
 [ -d "$pkg/src" ] || { echo "unpacked package has no src/: $pkg" >&2; exit 1; }
 
 failures=0
@@ -37,7 +52,7 @@ publish = false
 [workspace]
 
 [dependencies]
-ws-pmd-rs = { path = "$pkg"${ours} }
+ws-pmd = { path = "$pkg"${ours} }
 http = "1"
 $flate2
 

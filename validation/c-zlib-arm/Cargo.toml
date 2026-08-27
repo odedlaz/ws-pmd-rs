@@ -18,7 +18,7 @@ publish = false
 [workspace]
 
 [dependencies]
-ws-pmd-rs = { path = "../..", default-features = false, features = ["zlib"] }
+ws-pmd = { path = "../..", default-features = false, features = ["zlib"] }
 http = "1"
 
 # The scenario driver builds peer messages with flate2. No backend request: with

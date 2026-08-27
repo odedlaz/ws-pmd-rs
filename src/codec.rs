@@ -188,7 +188,7 @@ impl Negotiated {
     ///
     /// ```
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use ws_pmd_rs::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -199,7 +199,7 @@ impl Negotiated {
     /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
     /// #     .expect("the server selected it");
     /// let (encoder, decoder) = agreed.into_codecs(EncoderConfig::new());
-    /// # Ok::<(), ws_pmd_rs::NegotiationError>(())
+    /// # Ok::<(), ws_pmd::NegotiationError>(())
     /// ```
     ///
     /// There is one terminal constructor, not two. A receive-only host drops the
@@ -209,7 +209,7 @@ impl Negotiated {
     ///
     /// ```compile_fail,E0599
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use ws_pmd_rs::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -220,7 +220,7 @@ impl Negotiated {
     /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
     /// #     .expect("the server selected it");
     /// let decoder = agreed.into_decoder();
-    /// # Ok::<(), ws_pmd_rs::NegotiationError>(())
+    /// # Ok::<(), ws_pmd::NegotiationError>(())
     /// ```
     ///
     /// Spending the same agreement twice does not compile either.
@@ -234,7 +234,7 @@ impl Negotiated {
     ///
     /// ```compile_fail,E0382
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use ws_pmd_rs::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -246,7 +246,7 @@ impl Negotiated {
     /// #     .expect("the server selected it");
     /// let (encoder, decoder) = agreed.into_codecs(EncoderConfig::new());
     /// let (again, and_again) = agreed.into_codecs(EncoderConfig::new());
-    /// # Ok::<(), ws_pmd_rs::NegotiationError>(())
+    /// # Ok::<(), ws_pmd::NegotiationError>(())
     /// ```
     ///
     /// And the agreement cannot be duplicated, which the row above does not
@@ -262,7 +262,7 @@ impl Negotiated {
     ///
     /// ```compile_fail,E0599
     /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-    /// # use ws_pmd_rs::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
     /// # let mut request = HeaderMap::new();
     /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
     /// # let mut response = HeaderMap::new();
@@ -273,7 +273,7 @@ impl Negotiated {
     /// # let agreed = offer.seal(&request)?.finish(&response, PmdComposition::Compatible)?
     /// #     .expect("the server selected it");
     /// let spare = agreed.clone();
-    /// # Ok::<(), ws_pmd_rs::NegotiationError>(())
+    /// # Ok::<(), ws_pmd::NegotiationError>(())
     /// ```
     #[must_use]
     pub fn into_codecs(self, config: EncoderConfig) -> (Encoder, Decoder) {

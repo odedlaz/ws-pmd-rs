@@ -15,7 +15,7 @@
 //!
 //! ```
 //! use http::HeaderMap;
-//! use ws_pmd_rs::{ClientConfig, ClientOffer, PmdComposition};
+//! use ws_pmd::{ClientConfig, ClientOffer, PmdComposition};
 //!
 //! let mut request = HeaderMap::new();
 //! let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
@@ -35,7 +35,7 @@
 //!     .expect("the server selected it");
 //! assert_eq!(negotiated.peer_max_window_bits(), 12);
 //! assert_eq!(negotiated.local_max_window_bits(), 15);
-//! # Ok::<(), ws_pmd_rs::NegotiationError>(())
+//! # Ok::<(), ws_pmd::NegotiationError>(())
 //! ```
 //!
 //! A client that deliberately offered nothing seals that fact instead, with

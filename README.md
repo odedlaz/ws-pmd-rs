@@ -1,4 +1,4 @@
-# ws-pmd-rs
+# ws-pmd
 
 RFC 7692 `permessage-deflate` for Rust: extension negotiation and per-connection DEFLATE
 state, independent of any WebSocket implementation.
@@ -8,8 +8,8 @@ compression state that follows from the agreement. It owns nothing else. It has 
 no runtime, and no frame type, and it holds no opinion about masking, opcodes, close codes,
 UTF-8, or message assembly. Those stay with the host.
 
-The crate is `ws-pmd-rs`. Where this document writes `permessage-deflate` it means the RFC
-7692 extension token, not the crate.
+The crate is `ws-pmd`; its repository is `ws-pmd-rs`. Where this document writes
+`permessage-deflate` it means the RFC 7692 extension token, not the crate.
 
 ## Status
 
@@ -22,7 +22,7 @@ Until it is published, depend on it by git reference:
 
 ```toml
 [dependencies]
-ws-pmd-rs = { git = "https://github.com/odedlaz/ws-pmd-rs" }
+ws-pmd = { git = "https://github.com/odedlaz/ws-pmd-rs" }
 ```
 
 ## Scope
@@ -50,7 +50,7 @@ applies the response:
 
 ```rust
 use http::HeaderMap;
-use ws_pmd_rs::{ClientConfig, ClientOffer, PmdComposition};
+use ws_pmd::{ClientConfig, ClientOffer, PmdComposition};
 
 let mut request = HeaderMap::new();
 let offer = ClientOffer::install(ClientConfig::new(), &mut request)?;
@@ -70,7 +70,7 @@ element, and commits only once that element has survived the host's own callback
 
 ```rust
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap};
-use ws_pmd_rs::{PmdComposition, ServerConfig, ServerHandshake};
+use ws_pmd::{PmdComposition, ServerConfig, ServerHandshake};
 
 let Some(selection) = ServerHandshake::accept(ServerConfig::new(), &request)? else {
     // Nothing offered, or nothing this configuration can honour.
@@ -103,7 +103,7 @@ An agreement is consumed to produce the pair of codecs for that connection. `Neg
 neither `Copy` nor `Clone`, so one agreement cannot mint two sets of compression state.
 
 ```rust
-use ws_pmd_rs::{DecompressedLimit, EncoderConfig};
+use ws_pmd::{DecompressedLimit, EncoderConfig};
 
 let (mut encoder, mut decoder) = negotiated.into_codecs(EncoderConfig::new());
 

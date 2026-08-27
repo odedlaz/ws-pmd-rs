@@ -13,7 +13,7 @@
 use std::thread;
 
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
-use ws_pmd_rs::{
+use ws_pmd::{
     ClientConfig, ClientOffer, Decoder, DecompressedLimit, Encoder, EncoderConfig, PmdComposition,
 };
 

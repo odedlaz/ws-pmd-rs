@@ -12,11 +12,21 @@ rust-version = "1.85"
 # The named backend arms and the fuzz workspace are development-only and must
 # not ship in the package; see validation/README.md. The agent instructions go
 # with them: they are written for this repository, not for a caller, and every
-# consumer downloads them otherwise. `README.md` cannot be dropped here at all -- Cargo
+# consumer downloads them otherwise. `CONTRIBUTING.md` joins them: the gate it
+# documents needs a clone, and the paths it names -- `validation/`, `.github/`
+# -- are excluded here too, so a tarball reader would get a guide to files that
+# are absent. `README.md` cannot be dropped here at all -- Cargo
 # force-includes the auto-detected readme, so removing it takes `readme = false`
 # *and* an entry in this list. Either alone still ships the file, and neither
 # warns.
-exclude = [".github", "validation", "fuzz", "AGENTS.md", "CLAUDE.md"]
+exclude = [
+    ".github",
+    "validation",
+    "fuzz",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+]
 
 # Activation requests, not exclusive guarantees. Cargo unions features across a
 # graph, so naming one here cannot stop a dependent from also turning the other

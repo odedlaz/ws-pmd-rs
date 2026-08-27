@@ -140,7 +140,7 @@ jobs:
         run: |
           listing=$(cargo package --locked --list)
           printf '%s\n' "$listing"
-          for unwanted in .github/ fuzz/ validation/ AGENTS.md CLAUDE.md; do
+          for unwanted in .github/ fuzz/ validation/ AGENTS.md CLAUDE.md CONTRIBUTING.md; do
             if printf '%s\n' "$listing" | grep -q "^${unwanted}"; then
               echo "::error::${unwanted} is in the published archive" >&2
               exit 1

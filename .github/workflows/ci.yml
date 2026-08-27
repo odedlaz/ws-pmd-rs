@@ -312,9 +312,13 @@ jobs:
         env:
           ACTIONLINT_VERSION: 1.7.12
           ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        # `--retry-all-errors` retries a 4xx too, so a wrong pin costs about
+        # thirty seconds before it fails instead of failing at once. That is the
+        # price of not reading a reset connection as a bad release.
         run: |
           url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl --fail --silent --show-error --location -o actionlint.tar.gz "$url"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            -o actionlint.tar.gz "$url"
           echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -version
@@ -361,7 +365,8 @@ jobs:
           OPENGREP_SHA256: 85af2f34e5175995acbc431e1ca733e34062aad9640ad4308422abe1968b84cf
         run: |
           url="https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
-          curl --fail --silent --show-error --location -o opengrep "$url"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            -o opengrep "$url"
           echo "${OPENGREP_SHA256}  opengrep" | sha256sum --check --strict
           chmod +x opengrep
           ./opengrep --version

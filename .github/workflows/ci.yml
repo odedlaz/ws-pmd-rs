@@ -1,0 +1,417 @@
+name: CI
+
+# Every row runs on every event. No branch or path filters: a filter that skips
+# a job makes `ci-passed` succeed without it, which is the same as not having it.
+on:
+  push:
+  pull_request:
+  merge_group:
+
+permissions:
+  contents: read
+
+# Keyed by an identity that is stable for the event, so a rerun of the same PR,
+# merge group, or ref cancels its predecessor and nothing else. This cannot
+# cancel a differently named merge group and does not claim to.
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{
+      github.event.pull_request.number
+      || github.event.merge_group.head_ref
+      || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The exact nightly the fuzz lane was planned against.
+  FUZZ_TOOLCHAIN: nightly-2026-08-20
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Root package
+        run: cargo fmt --check
+      - name: Independent workspaces
+        run: |
+          cargo fmt --manifest-path validation/zlib-rs-arm/Cargo.toml --check
+          cargo fmt --manifest-path validation/c-zlib-arm/Cargo.toml --check
+          cargo fmt --manifest-path fuzz/Cargo.toml --check
+      # Sources no manifest owns. `cargo fmt` walks targets, so a file that is
+      # `include!`d by a generated consumer is reached by no manifest here and
+      # would go unformatted forever.
+      - name: Sources outside every manifest
+        run: |
+          rustfmt --edition 2021 --check validation/shared/scenarios.rs
+          rustfmt --edition 2021 --check validation/consumer-matrix/public_api.rs
+
+  clippy:
+    name: clippy (${{ matrix.axis }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # None of the three contains another; Cargo.toml's [lints.clippy]
+        # comment says why.
+        axis: [default, all-targets, all-features]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Select the axis
+        id: axis
+        run: |
+          case '${{ matrix.axis }}' in
+            default)      echo 'flags=' >> "$GITHUB_OUTPUT" ;;
+            all-targets)  echo 'flags=--all-targets' >> "$GITHUB_OUTPUT" ;;
+            all-features) echo 'flags=--all-features' >> "$GITHUB_OUTPUT" ;;
+            *) echo "unknown axis" >&2; exit 1 ;;
+          esac
+      # `-D warnings` on the command line, not a manifest level: a warn-level
+      # lint prints and still exits 0, so exit code alone is not zero findings.
+      - name: Clippy
+        run: cargo clippy --locked ${{ steps.axis.outputs.flags }} -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      # `--all-targets` is not a substitute: it excludes doctests, and ten of
+      # this crate's fifteen import sites are doctest lines under src/.
+      - name: Test
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked --no-fail-fast
+
+  rustdoc:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      # A plain `cargo doc` exits 0 on warnings, so the flags are the gate.
+      - name: Document
+        env:
+          RUSTDOCFLAGS: -D warnings -D rustdoc::broken_intra_doc_links
+        run: cargo doc --locked --no-deps
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Exact, not a range: this proves the `rust-version` the manifest declares,
+      # which compiling on current stable does not.
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: 1.85.0
+      - name: Test on the declared minimum
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked --no-fail-fast
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Package
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo package --locked --all-features
+      # `exclude` fails silently -- a name it cannot drop produces no warning --
+      # so the archive is inspected rather than the manifest trusted.
+      - name: The archive ships neither development tree
+        run: |
+          listing=$(cargo package --locked --list)
+          printf '%s\n' "$listing"
+          for unwanted in .github/ fuzz/ validation/ AGENTS.md CLAUDE.md; do
+            if printf '%s\n' "$listing" | grep -q "^${unwanted}"; then
+              echo "::error::${unwanted} is in the published archive" >&2
+              exit 1
+            fi
+          done
+          for required in README.md LICENSE; do
+            if ! printf '%s\n' "$listing" | grep -qx "${required}"; then
+              echo "::error::${required} is missing from the published archive" >&2
+              exit 1
+            fi
+          done
+
+  backend:
+    name: backend (${{ matrix.arm }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner and target dir each. Built together, Cargo unions the
+        # features and both arms get the C backend.
+        include:
+          - arm: zlib-rs
+            manifest: validation/zlib-rs-arm/Cargo.toml
+          - arm: c-zlib
+            manifest: validation/c-zlib-arm/Cargo.toml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Clippy
+        run: >-
+          cargo clippy --locked --all-targets
+          --manifest-path ${{ matrix.manifest }} -- -D warnings
+      - name: Test
+        env:
+          RUSTFLAGS: -D warnings
+        run: >-
+          cargo test --locked --no-fail-fast
+          --manifest-path ${{ matrix.manifest }}
+
+  consumer-matrix:
+    name: consumer-matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - name: Seven external feature graphs against the packaged crate
+        env:
+          RUSTFLAGS: -D warnings
+        run: ./validation/consumer-matrix/run.sh
+
+  fuzz-lint:
+    name: fuzz-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+          components: clippy, rustfmt
+      # A fuzz target is repository code. Living in an independent workspace is
+      # not a warning exemption.
+      - name: Format
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+      - name: Clippy
+        run: >-
+          cargo clippy --manifest-path fuzz/Cargo.toml
+          --all-targets --all-features -- -D warnings
+
+  fuzz:
+    name: fuzz (${{ matrix.target }}, ${{ matrix.backend }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [fuzz-lint]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: server_accept
+            backend: zlib-rs
+          - target: client_finish
+            backend: zlib-rs
+          - target: decoder
+            backend: zlib-rs
+          # The decoder is the only target whose behaviour is backend-dependent,
+          # so it is the only one that earns a second leg.
+          - target: decoder
+            backend: zlib
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: ${{ env.FUZZ_TOOLCHAIN }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version "${CARGO_FUZZ_VERSION}"
+      # A five-minute smoke run per leg, not a claim of exhaustive fuzzing.
+      - name: Fuzz
+        run: >-
+          cargo fuzz run ${{ matrix.target }}
+          --fuzz-dir fuzz
+          --no-default-features --features ${{ matrix.backend }}
+          --
+          -max_total_time=300 -max_len=65536 -timeout=10 -rss_limit_mb=2048
+          -artifact_prefix=fuzz/artifacts/${{ matrix.target }}/
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}-${{ matrix.backend }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint 1.7.12
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location -o actionlint.tar.gz "$url"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -version
+      # No -ignore expressions. Ubuntu ships ShellCheck on PATH, so `run:` bodies
+      # are checked too.
+      - name: Lint
+        run: ./actionlint -color
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Console mode, not SARIF: SARIF/Advanced Security mode does not fail on
+      # findings. `pedantic`, not `auditor` -- auditor deliberately emits likely
+      # false positives, which cannot carry a zero-finding policy.
+      - uses: zizmorcore/zizmor-action@3dc1ecc9bcb9e94e9b2c709687979e1298497054 # v0.6.2
+        with:
+          version: v1.29.0
+          persona: pedantic
+          advanced-security: false
+          online-audits: true
+          fail-on-no-inputs: true
+
+  opengrep:
+    name: opengrep
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the pinned rule pack
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: amplify-security/opengrep-rules
+          ref: e7643a008ec9027c96dfef7bdf5aedcac3847da8
+          path: .opengrep-rules
+          persist-credentials: false
+      - name: Install OpenGrep 1.28.0
+        env:
+          OPENGREP_VERSION: v1.28.0
+          OPENGREP_SHA256: 85af2f34e5175995acbc431e1ca733e34062aad9640ad4308422abe1968b84cf
+        run: |
+          url="https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          curl --fail --silent --show-error --location -o opengrep "$url"
+          echo "${OPENGREP_SHA256}  opengrep" | sha256sum --check --strict
+          chmod +x opengrep
+          ./opengrep --version
+      # Qualification before the scan. A clean result from an engine that parsed
+      # no rules is indistinguishable from a clean codebase, so the pack is
+      # counted and then proved to fire before its silence is believed.
+      - name: Qualify the rule pack
+        run: |
+          rules=.opengrep-rules/rust/lang/security
+          count=$(find "$rules" -name '*.yml' | wc -l)
+          echo "rule files: $count"
+          if [ "$count" -ne 10 ]; then
+            echo "::error::expected 10 pinned Rust security rules, found $count" >&2
+            exit 1
+          fi
+          # The pack ships a deliberately vulnerable fixture beside each rule.
+          # Scanning one and requiring its own rule ID back is the known-positive:
+          # it fails both when the rules do not parse and when they parse but
+          # match nothing. No --error here -- a finding is the expected result.
+          ./opengrep scan --strict --json --config "$rules" \
+            "$rules/unsafe-usage.rs" > qualify.json
+          if ! grep -q '"unsafe-usage"' qualify.json; then
+            echo "::error::the pack did not report unsafe-usage on its own fixture" >&2
+            cat qualify.json >&2
+            exit 1
+          fi
+      # --error and --strict make findings and malformed rules a failure.
+      # --disable-nosem makes suppressed findings visible.
+      - name: Scan this crate's Rust roots
+        run: >-
+          ./opengrep scan --error --strict --disable-nosem
+          --config .opengrep-rules/rust/lang/security
+          src tests validation fuzz
+      # --disable-nosem reveals a suppressed finding; it does not fail merely
+      # because the suppression text is there. This is what enforces the policy.
+      - name: No inline suppressions
+        run: |
+          if grep -rInE 'nosem(grep)?' src tests validation fuzz; then
+            echo "::error::inline suppression text is not allowed in this lane" >&2
+            exit 1
+          fi
+
+  ci-passed:
+    name: ci-passed
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - fmt
+      - clippy
+      - test
+      - rustdoc
+      - msrv
+      - package
+      - backend
+      - consumer-matrix
+      - fuzz-lint
+      - fuzz
+      - actionlint
+      - zizmor
+      - opengrep
+    steps:
+      # `needs.*.result` includes skipped and cancelled. Requiring every one to
+      # be `success` is the only form that cannot pass on a job that never ran.
+      - name: Every job succeeded
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: ${RESULTS}"
+          for result in ${RESULTS}; do
+            if [ "$result" != "success" ]; then
+              echo "::error::a required job did not succeed" >&2
+              exit 1
+            fi
+          done

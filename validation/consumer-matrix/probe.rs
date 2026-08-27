@@ -1,7 +1,7 @@
 //! Reports which behaviour answers, never which backend. See `run.sh`: the two
 //! coincide only at the locked flate2, and provenance is a graph fact.
 #![allow(dead_code)]
-include!("scenarios.rs");
+include!("shared/scenarios.rs");
 
 #[test]
 fn which_behaviour_answers() {

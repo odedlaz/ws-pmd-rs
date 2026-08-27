@@ -62,7 +62,11 @@ $flate2
 version = "1.0.31"
 default-features = false
 EOF
-    cp "$root/validation/shared/scenarios.rs" "$dir/tests/scenarios.rs"
+    # Not `tests/scenarios.rs`: cargo auto-discovers every top-level file
+    # there as its own test target, and this one holds no `#[test]` -- as a
+    # target it is entirely dead code. A subdirectory is not discovered.
+    mkdir -p "$dir/tests/shared"
+    cp "$root/validation/shared/scenarios.rs" "$dir/tests/shared/scenarios.rs"
     cp "$root/validation/consumer-matrix/probe.rs" "$dir/tests/probe.rs"
     cp "$root/validation/consumer-matrix/public_api.rs" "$dir/tests/public_api.rs"
 

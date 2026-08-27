@@ -1,0 +1,52 @@
+[package]
+name = "ws-pmd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace on purpose. Inside the root one it would join that feature
+# graph, and the two backend legs below exist precisely to keep `zlib-rs` and
+# `zlib` from unifying. It is also excluded from the package: see the root
+# manifest.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+http = "1"
+libfuzzer-sys = "0.4"
+
+# Defaults off so a leg gets exactly the backend it names. With defaults on,
+# `--features zlib` would resolve to `zlib-rs` *and* `zlib`, and the C leg would
+# stop testing what it is named for -- the same unification the two validation
+# arms are separated to avoid.
+[dependencies.ws-pmd]
+path = ".."
+default-features = false
+
+[features]
+zlib-rs = ["ws-pmd/zlib-rs"]
+zlib = ["ws-pmd/zlib"]
+
+[[bin]]
+name = "server_accept"
+path = "fuzz_targets/server_accept.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "client_finish"
+path = "fuzz_targets/client_finish.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decoder"
+path = "fuzz_targets/decoder.rs"
+test = false
+doc = false
+bench = false

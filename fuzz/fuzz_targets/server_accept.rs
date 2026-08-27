@@ -20,6 +20,10 @@ fuzz_target!(|data: &[u8]| {
         let Ok(value) = HeaderValue::from_bytes(line) else {
             continue;
         };
+        // Every slice appends under this one name, so the infallible `append` cannot
+        // panic here: `HeaderMap`'s `MAX_SIZE` bounds distinct names and `keys_len()`
+        // stays 1 for any input this target can build. Append under a second name and
+        // that stops holding, and `try_append` becomes required rather than defensive.
         headers.append(SEC_WEBSOCKET_EXTENSIONS, value);
     }
 

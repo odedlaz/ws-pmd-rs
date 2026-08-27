@@ -14,17 +14,22 @@ permissions:
 # merge group, or ref cancels its predecessor and nothing else. This cannot
 # cancel a differently named merge group and does not claim to.
 #
-# `main` is exempt from cancellation. Superseding a branch run costs nothing --
-# the answer wanted is about the tip -- but on `main` the question is "what did
-# this commit's gate say", and a cancelled run answers it for no commit. Three
-# consecutive pushes to `main` lost their verdict that way, one of them the only
-# completed red run we had.
+# On `main` the key carries the commit as well, so every push gets a group of
+# its own. Superseding a branch run costs nothing -- the answer wanted is about
+# the tip -- but on `main` the question is "what did this commit's gate say",
+# and there are two ways to lose the answer. Exempting `main` from
+# `cancel-in-progress` stops a *running* verdict being superseded; three `main`
+# runs were cancelled that way. It does not stop a *pending* one being discarded
+# when the next push joins the group, which is what cost `531af7b` its verdict:
+# cancelled with zero jobs ever started, one second after the following push.
+# The per-commit key removes both; the exemption stays as a fallback for a group
+# ever reached twice at one commit.
 concurrency:
   group: >-
     ${{ github.workflow }}-${{ github.event_name }}-${{
       github.event.pull_request.number
       || github.event.merge_group.head_ref
-      || github.ref }}
+      || github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'tip' }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:

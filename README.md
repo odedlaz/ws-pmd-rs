@@ -174,10 +174,10 @@ neither is legal when some other edge supplies a backend, and `flate2` raises it
 when none does.
 
 Which backend a graph resolved is visible in `cargo tree -e features`, not in behaviour: the
-two implement one specification. Where they diverge is inflater window enforcement, and
-`validation/` pins both sides of it. Compressed output is not byte-identical between them,
-so any measurement of size or speed must name the backend, the compression level and the
-platform to mean anything.
+two implement one specification. Where they diverge is inflater window enforcement, and the
+repository's `validation/` pins both sides of it. Compressed output is not byte-identical
+between them, so any measurement of size or speed must name the backend, the compression level
+and the platform to mean anything.
 
 ## Correctness
 
@@ -188,8 +188,9 @@ and a test pinning it, so the allowance goes red if the invariant stops holding.
 The decoder's tests drive it from a `flate2` peer independent of this crate's encoder, so a
 mistake shared by both cannot pass as a round trip. That peer is the same engine the crate
 itself calls, so it checks this crate's codec logic and not DEFLATE. Beyond the crate's own
-suite, `validation/` holds two named-backend arms and a consumer matrix that builds the
-*packaged* crate from outside. See [`validation/README.md`](validation/README.md).
+suite, the repository's `validation/` holds two named-backend arms and a consumer matrix that
+builds the *packaged* crate from outside. See
+[`validation/README.md`](https://github.com/odedlaz/ws-pmd-rs/blob/main/validation/README.md).
 
 The suite tests RFC 7692 byte vectors. There is no published Autobahn or other
 conformance-suite run for this crate.
@@ -201,8 +202,8 @@ Rust 1.85, edition 2021. Raising it is a breaking change.
 ## Getting help and contributing
 
 Bug reports and patches go through the repository's issue tracker. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for the scope this crate accepts and the gate a change
-has to pass.
+[CONTRIBUTING.md](https://github.com/odedlaz/ws-pmd-rs/blob/main/CONTRIBUTING.md) for the
+scope this crate accepts and the gate a change has to pass.
 
 ## Acknowledgements
 

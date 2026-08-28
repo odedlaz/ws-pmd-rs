@@ -1003,6 +1003,38 @@ mod tests {
         assert_eq!(strip_or_synthesize(b"Hello", with_trailer), Ok(vec![0xf2, 0x48]));
     }
 
+    /// Only a trailer at the end is stripped, and the nearest one behind it is
+    /// not.
+    ///
+    /// `gate-final-strip-bytes` cannot separate an exact tail removal from a
+    /// backward search: a sync-flushing producer always ends in the trailer, so
+    /// both find the same four octets. Output with an internal copy and no
+    /// terminal one is the input that separates them, and only a direct call can
+    /// supply it -- a backward scan truncates at the internal copy and returns a
+    /// short body as success.
+    #[test]
+    fn only_a_terminal_trailer_is_stripped() {
+        let mut internal_only = vec![0xf2, 0x48];
+        internal_only.extend_from_slice(TRAILER);
+        internal_only.extend_from_slice(&[0xcd, 0xc9]);
+        let mut both_copies = internal_only.clone();
+        both_copies.extend_from_slice(TRAILER);
+
+        assert_eq!(
+            strip_or_synthesize(b"Hello", internal_only.clone()),
+            Err(CodecError::CompressionFailed),
+            "a trailer that is not at the end must not be stripped"
+        );
+
+        // The other direction, and the control that this row can go green on
+        // correct behaviour rather than only on refusal.
+        assert_eq!(
+            strip_or_synthesize(b"Hello", both_copies),
+            Ok(internal_only),
+            "the internal copy must survive the terminal one's removal"
+        );
+    }
+
     /// The local direction of the agreement, for every width both roles can
     /// negotiate, read off a real agreement rather than a helper beside one.
     ///

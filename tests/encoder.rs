@@ -1177,8 +1177,9 @@ fn every_produced_non_final_fragment_keeps_its_trailer() {
 /// backward search locates that terminal copy and agrees with an exact tail
 /// removal everywhere here -- including the two rows whose plaintext carries a
 /// copy of its own. Separating them needs a final fragment with an internal
-/// trailer and none at the end, and a producer that sync-flushes cannot emit
-/// one, so it is not a fixture this suite can build.
+/// trailer and none at the end, which a sync-flushing producer cannot emit --
+/// so the discrimination lives one level down, in the unit row
+/// `only_a_terminal_trailer_is_stripped`, which calls the step directly.
 #[test]
 fn the_final_fragment_strips_exactly_the_terminal_trailer() {
     let mut ends_with_trailer = b"stored plaintext ".to_vec();

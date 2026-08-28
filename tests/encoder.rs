@@ -10,8 +10,9 @@
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use ws_pmd::{
-    ClientConfig, ClientOffer, CodecError, Decoder, Encoder, EncoderConfig, PmdComposition,
-    ServerConfig, ServerHandshake,
+    ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, Encoder, EncoderConfig,
+    PmdComposition, PreparedFinalFragment, PreparedNonFinalFragment, ServerConfig, ServerHandshake,
+    StreamingMessage,
 };
 
 /// RFC 7692 section 7.2.1 step 3 removes this from every message's tail, so a
@@ -64,7 +65,11 @@ impl Verifier {
         Self(Decompress::new_with_window_bits(false, 15))
     }
 
-    /// One complete message, with the stripped trailer fed back.
+    /// One complete message's wire bytes, with the stripped trailer fed back.
+    ///
+    /// A whole-message candidate and a streamed message's fragments concatenated
+    /// in order are the same input here: one message loses exactly one trailer,
+    /// wherever it was produced, so the feed-back is the same either way.
     fn accept(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let mut fed = wire.to_vec();
         fed.extend_from_slice(TRAILER);
@@ -172,6 +177,11 @@ fn level_discriminating() -> Vec<u8> {
 /// A client pair at an exact negotiated width and takeover setting, built by
 /// running the real handshake rather than by constructing an agreement beside it.
 fn client_codecs(local: u8, peer: u8, takeover: bool, config: EncoderConfig) -> Encoder {
+    client_pair(local, peer, takeover, config).0
+}
+
+/// The same agreement kept whole, for the rows that need the decoder too.
+fn client_pair(local: u8, peer: u8, takeover: bool, config: EncoderConfig) -> (Encoder, Decoder) {
     let client = ClientConfig::new()
         .client_no_context_takeover(takeover)
         .client_max_window_bits(local)
@@ -196,7 +206,6 @@ fn client_codecs(local: u8, peer: u8, takeover: bool, config: EncoderConfig) -> 
         .expect("the response is legal")
         .expect("the server selected it")
         .into_codecs(config)
-        .0
 }
 
 /// A server pair at an exact negotiated width and takeover setting.
@@ -232,6 +241,74 @@ fn takeover_encoder() -> Encoder {
 /// Prepare and commit one message.
 fn send(encoder: &mut Encoder, payload: &[u8]) -> Vec<u8> {
     encoder.prepare_message(payload).expect("a prepared message").commit()
+}
+
+/// Stream one message and return its fragment payloads in order.
+///
+/// The last chunk is always the final fragment, so a one-element slice is a
+/// single-fragment message rather than an unterminated stream.
+fn stream(encoder: &mut Encoder, chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+    let (last, leading) = chunks.split_last().expect("a message ends with a final fragment");
+    let mut open = encoder.begin_streaming_message().expect("a stream");
+    let mut fragments = Vec::new();
+    for chunk in leading {
+        let (bytes, next) = open.prepare_non_final_fragment(chunk).expect("a fragment").commit();
+        fragments.push(bytes);
+        open = next;
+    }
+    fragments.push(last_fragment(open, last));
+    fragments
+}
+
+/// The final fragment alone, so a row can end a stream it built by hand.
+fn last_fragment(open: StreamingMessage<'_>, payload: &[u8]) -> Vec<u8> {
+    open.prepare_final_fragment(payload).expect("a final fragment").commit()
+}
+
+/// RFC 7692 section 7.2.1 steps 1 and 2 run by hand on `flate2`, once per chunk.
+///
+/// Same arm and buffered at 1 MiB, for the reason [`direct`] gives. What it does
+/// *not* do is step 3: every chunk comes back with whatever trailer the flush
+/// produced, the final one included. The row that pins the strip deletes those
+/// four octets itself after asserting they are there, so the expectation is never
+/// produced by the same tail search the production code performs.
+fn direct_stream_aligned(level: u32, window_bits: u8, chunks: &[&[u8]]) -> Vec<Vec<u8>> {
+    let mut compressor =
+        Compress::new_with_window_bits(Compression::new(level), false, window_bits);
+    chunks
+        .iter()
+        .map(|chunk| {
+            let mut out = Vec::new();
+            let mut input = *chunk;
+            while !input.is_empty() {
+                out.reserve(1 << 20);
+                let before = (compressor.total_in(), compressor.total_out());
+                compressor
+                    .compress_vec(input, &mut out, FlushCompress::None)
+                    .expect("the backend compresses");
+                let consumed = usize::try_from(compressor.total_in() - before.0).expect("fits");
+                if consumed == 0 && compressor.total_out() == before.1 {
+                    break;
+                }
+                input = &input[consumed..];
+            }
+            loop {
+                out.reserve(1 << 20);
+                let before = compressor.total_out();
+                compressor.compress_vec(&[], &mut out, FlushCompress::Sync).expect("it flushes");
+                if compressor.total_out() == before {
+                    break;
+                }
+            }
+            out
+        })
+        .collect()
+}
+
+/// A whole streamed message as the peer's inflater receives it: the fragments in
+/// order, with the one stripped trailer fed back by [`Verifier::accept`].
+fn on_the_wire(fragments: &[Vec<u8>]) -> Vec<u8> {
+    fragments.concat()
 }
 
 // ------------------------------------------------------- gate-rfc-vectors
@@ -661,14 +738,20 @@ fn the_local_window_bounds_back_references() {
 
 // ------------------------------------------------------ gate-fragment-split
 
-/// A host may split the returned payload anywhere; the encoder never sees a
-/// fragment.
+/// A host may split a `prepare_message` payload anywhere; on that path the
+/// encoder never sees a fragment.
 ///
 /// RFC 7692 section 7.2.1: "An endpoint fragments a compressed message by
-/// splitting the result of running this algorithm." The adjacent MUST NOT — that
-/// `00 00 ff ff` is not removed from non-final fragments — governs the other
-/// strategy, where a host calls an encoder once per fragment, and nothing here
-/// enters it: the trailer is removed once, from the complete result.
+/// splitting the result of running this algorithm." That is the strategy
+/// `prepare_message` implements, and this row stays inside it: the trailer is
+/// removed once, from the complete result, and the host cuts the bytes wherever
+/// it likes.
+///
+/// The adjacent MUST NOT — that `00 00 ff ff` is not removed from non-final
+/// fragments — governs the *other* strategy, one encoder call per fragment.
+/// `begin_streaming_message` is that strategy and nothing here enters it; the
+/// rows that do are `gate-nonfinal-tail` and `gate-composite-peer`. The contrast
+/// is the point of this row, so scoping it is not the same as retiring it.
 #[test]
 fn host_side_fragment_splitting_preserves_the_bytes() {
     let payload = incompressible(50_000, 149);
@@ -772,6 +855,628 @@ fn the_encoder_matches_a_differently_buffered_compressor() {
                     "level {level}, {shape}, {len} bytes"
                 );
             }
+        }
+    }
+}
+
+// --------------------------------------------------------- gate-public-shape
+
+/// The whole streaming sequence through public imports: begin, non-final
+/// prepare, inspect, mask and unmask, commit, final prepare, commit.
+///
+/// A shape and ownership row. Recovering the plaintext here proves the states
+/// hand the compressor along correctly and that a host can drive them; it is not
+/// conformance evidence, which is `gate-composite-peer`'s job against a peer that
+/// is not this crate.
+#[test]
+fn a_host_drives_the_whole_streaming_sequence() {
+    let mut encoder = takeover_encoder();
+    let chunks: [&[u8]; 3] =
+        [b"a message that arrives ", b"in three pieces, ", b"masked in flight"];
+
+    let mut open = encoder.begin_streaming_message().expect("a stream");
+    let mut wire = Vec::new();
+    for chunk in &chunks[..2] {
+        let mut fragment = open.prepare_non_final_fragment(chunk).expect("a fragment");
+        assert!(!fragment.as_bytes().is_empty(), "a non-empty chunk produces bytes");
+
+        // The reversible transport transform a client applies, and undoes here
+        // so the peer sees what the encoder produced.
+        let mask = [0x37u8, 0xfa, 0x21, 0x3d];
+        for (i, byte) in fragment.as_bytes_mut().iter_mut().enumerate() {
+            *byte ^= mask[i % 4];
+        }
+        let (mut bytes, next) = fragment.commit();
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte ^= mask[i % 4];
+        }
+        wire.push(bytes);
+        open = next;
+    }
+
+    let mut last = open.prepare_final_fragment(chunks[2]).expect("a final fragment");
+    assert!(!last.as_bytes_mut().is_empty(), "mutable access reaches the final candidate too");
+    wire.push(last.commit());
+
+    // One peer for the whole connection, because the encoder retains history
+    // across the message boundary and the follow-up may reference back into the
+    // streamed message. A fresh inflater for the second message is a real bug
+    // that only one backend reports: zlib-rs happened to choose matches that did
+    // not reach back, and C zlib refused the same row with "invalid distance too
+    // far back".
+    let mut peer = Verifier::new();
+    assert_eq!(
+        peer.accept(&on_the_wire(&wire)).expect("a valid stream"),
+        chunks.concat(),
+        "the three chunks, in order, exactly"
+    );
+
+    // And the encoder is back: a streamed message is not a terminal state.
+    assert_eq!(
+        peer.accept(&send(&mut encoder, b"after the stream")).expect("valid"),
+        b"after the stream"
+    );
+}
+
+// -------------------------------------------------------- gate-composite-peer
+
+/// A streamed message decodes to exactly its chunks, through an inflater built
+/// directly on `flate2`.
+///
+/// The conformance row for continuity and for the non-final trailer rule, and
+/// the three negative controls are what say so: strip a non-final fragment's
+/// trailer, drop a middle fragment, or flip one octet, and the peer must fail or
+/// return something else. What this oracle *cannot* see was measured too —
+/// removing or duplicating the final empty block leaves it green — so the final
+/// strip is pinned by bytes in `gate-final-strip-bytes` and not here.
+#[test]
+fn a_streamed_message_decodes_through_a_direct_peer() {
+    let long = incompressible(40_000, 23);
+    let sequences: [Vec<&[u8]>; 5] = [
+        vec![b"one fragment only"],
+        vec![b"first ", b"second ", b"third"],
+        vec![b"a message that ends empty", b""],
+        vec![b"", b"a message that starts empty"],
+        vec![&long[..17_000], &long[17_000..33_000], &long[33_000..]],
+    ];
+
+    for chunks in &sequences {
+        let mut encoder = takeover_encoder();
+        let fragments = stream(&mut encoder, chunks);
+        let expected: Vec<u8> = chunks.concat();
+        assert_eq!(
+            Verifier::new().accept(&on_the_wire(&fragments)).expect("a valid stream"),
+            expected,
+            "{} fragments",
+            chunks.len()
+        );
+
+        if chunks.len() < 2 {
+            continue;
+        }
+
+        // Control one: a non-final fragment stripped the way a complete message
+        // is. RFC 7692 section 7.2.1's MUST NOT, observed.
+        let stripped: Vec<Vec<u8>> = fragments
+            .iter()
+            .enumerate()
+            .map(|(i, fragment)| {
+                if i + 1 < fragments.len() && fragment.ends_with(TRAILER) {
+                    fragment[..fragment.len() - TRAILER.len()].to_vec()
+                } else {
+                    fragment.clone()
+                }
+            })
+            .collect();
+        if stripped != fragments {
+            assert_ne!(
+                Verifier::new().accept(&on_the_wire(&stripped)).ok().as_ref(),
+                Some(&expected),
+                "stripping a non-final trailer must not still decode to the message"
+            );
+        }
+
+        // Control two: an interior fragment dropped. Interior, and only when
+        // there is one: this oracle is measurably blind to a missing *final*
+        // empty block, so dropping index `len / 2` from a two-fragment sequence
+        // would assert something known to be false rather than test anything.
+        if fragments.len() >= 3 {
+            let mut missing = fragments.clone();
+            missing.remove(1);
+            assert_ne!(
+                Verifier::new().accept(&on_the_wire(&missing)).ok().as_ref(),
+                Some(&expected),
+                "a dropped interior fragment must not still decode to the message"
+            );
+        }
+
+        // Control three: one octet flipped inside the largest fragment's data.
+        // Interior on purpose. Octet zero is the DEFLATE block header, and its
+        // low bit is BFINAL -- setting it ends the stream after a block that has
+        // already produced the whole plaintext, so the peer returns the right
+        // bytes and the control asserts nothing.
+        let mut flipped = fragments.clone();
+        if let Some(target) =
+            flipped.iter_mut().max_by_key(|fragment| fragment.len()).filter(|f| f.len() >= 8)
+        {
+            let middle = target.len() / 2;
+            target[middle] ^= 0x40;
+            assert_ne!(
+                Verifier::new().accept(&on_the_wire(&flipped)).ok().as_ref(),
+                Some(&expected),
+                "a flipped octet must not still decode to the message"
+            );
+        }
+    }
+}
+
+// ----------------------------------------------------------- gate-nonfinal-tail
+
+/// Every non-final fragment that produced bytes ends in `00 00 ff ff`, and an
+/// empty chunk is the only one allowed to produce none.
+///
+/// The conditional is not caution. What an empty non-final chunk yields is
+/// *positional* -- the five-octet empty block from a compressor that has not
+/// just flushed, nothing at all from one that has -- so asserting a trailer
+/// unconditionally would be red on a conforming backend.
+#[test]
+fn every_produced_non_final_fragment_keeps_its_trailer() {
+    for level in [0u32, 1, 6, 9] {
+        for sizes in [[1usize, 1, 1], [5, 4_096, 7], [40_000, 3, 65_540], [0, 8, 0]] {
+            let config = EncoderConfig::new().compression_level(level).expect("zlib's domain");
+            let mut encoder = client_codecs(15, 15, false, config);
+            let payloads: Vec<Vec<u8>> = sizes.iter().map(|&len| incompressible(len, 61)).collect();
+            let chunks: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+
+            let mut open = encoder.begin_streaming_message().expect("a stream");
+            let mut fragments = Vec::new();
+            for (i, chunk) in chunks[..chunks.len() - 1].iter().enumerate() {
+                let fragment = open.prepare_non_final_fragment(chunk).expect("a fragment");
+                let bytes = fragment.as_bytes();
+                if bytes.is_empty() {
+                    assert!(
+                        chunk.is_empty(),
+                        "level {level}, fragment {i}: a chunk with bytes produced none"
+                    );
+                } else {
+                    assert!(
+                        bytes.ends_with(TRAILER),
+                        "level {level}, fragment {i}: {} octets, tail {:02x?}",
+                        bytes.len(),
+                        &bytes[bytes.len().saturating_sub(8)..]
+                    );
+                }
+                let (bytes, next) = fragment.commit();
+                fragments.push(bytes);
+                open = next;
+            }
+            fragments.push(last_fragment(open, chunks[chunks.len() - 1]));
+
+            assert_eq!(
+                Verifier::new().accept(&on_the_wire(&fragments)).expect("a valid stream"),
+                chunks.concat(),
+                "level {level}, sizes {sizes:?}"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------------- gate-final-strip-bytes
+
+/// The final fragment removes exactly the last four octets, and never searches
+/// for them.
+///
+/// The expectation is built here rather than taken from the crate: a same-arm
+/// 1-MiB-buffered producer runs steps 1 and 2 over the identical chunk sequence,
+/// this row asserts its raw output ends in the trailer, and then deletes exactly
+/// four octets by index. A backward scan and an exact tail removal agree on
+/// ordinary output, so the corpus is chosen where they cannot: level 0 stores the
+/// payload verbatim, so a plaintext that *contains* `00 00 ff ff` — RFC 7692
+/// section 7.2.3.5's shape — puts a second copy in the compressed bytes, and a
+/// plaintext that *ends* with it puts one immediately before the flush's own.
+///
+/// The retained-tail counterfactual is the row's own control: the aligned output
+/// with its trailer still on must differ from what the crate returns. Without it
+/// an encoder that skipped step 3 entirely would pass every peer round trip in
+/// this file: an inflater accepts the extra empty block, so no round trip in
+/// either direction can stand in for this row.
+#[test]
+fn the_final_fragment_strips_exactly_the_terminal_trailer() {
+    let mut ends_with_trailer = b"stored plaintext ".to_vec();
+    ends_with_trailer.extend_from_slice(TRAILER);
+    let mut contains_trailer = b"before ".to_vec();
+    contains_trailer.extend_from_slice(TRAILER);
+    contains_trailer.extend_from_slice(b" after");
+
+    let corpus: [(&str, Vec<&[u8]>); 4] = [
+        ("plain single", vec![b"Hello"]),
+        ("plain multi", vec![b"lead ", b"tail"]),
+        ("final ends with the trailer", vec![b"lead ", &ends_with_trailer]),
+        ("final contains the trailer", vec![b"lead ", &contains_trailer]),
+    ];
+
+    // Level 0 stores literally, which is what puts the plaintext's own copies of
+    // the four octets into the compressed output; level 6 keeps an ordinary
+    // case in the row so it is not a level-0-only claim.
+    for level in [0u32, 6] {
+        for (name, chunks) in &corpus {
+            let config = EncoderConfig::new().compression_level(level).expect("zlib's domain");
+            let ours = stream(&mut client_codecs(15, 15, false, config), chunks);
+            let aligned = direct_stream_aligned(level, 15, chunks);
+            let raw_final = aligned.last().expect("a final chunk");
+
+            assert!(
+                raw_final.ends_with(TRAILER),
+                "level {level}, {name}: the reference produced no trailer to remove"
+            );
+            let expected = &raw_final[..raw_final.len() - TRAILER.len()];
+            assert_eq!(
+                ours.last().expect("a final fragment").as_slice(),
+                expected,
+                "level {level}, {name}: exactly four octets, deleted by index"
+            );
+
+            // The counterfactual this row exists to kill.
+            assert_ne!(
+                ours.last().expect("a final fragment").as_slice(),
+                raw_final.as_slice(),
+                "level {level}, {name}: the final fragment retained its trailer"
+            );
+
+            assert_eq!(
+                Verifier::new().accept(&on_the_wire(&ours)).expect("a valid stream"),
+                chunks.concat(),
+                "level {level}, {name}"
+            );
+        }
+    }
+}
+
+// ------------------------------------------------------------ gate-empty-final
+
+/// An empty final chunk is RFC 7692 section 7.2.3.6's single `0x00`, by either
+/// internal route.
+///
+/// The pair is the point. A fresh stream's empty final reaches the strip arm,
+/// because the compressor has not flushed yet and produces the trailer; an empty
+/// final after a committed non-final reaches the synthesize arm, because the
+/// preceding flush already drained it and this one yields nothing. Both are
+/// `[0x00]` on the wire, and that octet is the invariant — not the flush rank,
+/// the backend status, or the byte count before the transform.
+#[test]
+fn an_empty_final_fragment_is_the_rfc_octet_by_either_route() {
+    // Fresh: the empty final is the only fragment.
+    let mut fresh = takeover_encoder();
+    let alone = stream(&mut fresh, &[b""]);
+    assert_eq!(alone, vec![EMPTY_MESSAGE.to_vec()], "a fresh stream's empty final");
+
+    // After a committed non-final, whose flush has already drained the
+    // compressor.
+    let mut warmed = takeover_encoder();
+    let sequence = stream(&mut warmed, &[b"a fragment with bytes", b""]);
+    assert_eq!(
+        sequence.last().expect("a final fragment").as_slice(),
+        EMPTY_MESSAGE,
+        "an empty final after a committed fragment"
+    );
+    assert_eq!(
+        Verifier::new().accept(&on_the_wire(&sequence)).expect("a valid stream"),
+        b"a fragment with bytes",
+        "the empty final adds no plaintext"
+    );
+
+    // And the history the message left is still the peer's: a second,
+    // history-dependent message stays aligned on a shared inflater.
+    let mut peer = Verifier::new();
+    let mut encoder = takeover_encoder();
+    let first = stream(&mut encoder, &[b"repeated payload", b""]);
+    assert_eq!(peer.accept(&on_the_wire(&first)).expect("valid"), b"repeated payload");
+    let second = send(&mut encoder, b"repeated payload");
+    assert_eq!(peer.accept(&second).expect("valid"), b"repeated payload");
+    assert!(
+        second.len() < first.concat().len(),
+        "the second message did not reference the streamed message's history: {} vs {}",
+        second.len(),
+        first.concat().len()
+    );
+}
+
+// ------------------------------------------------- gate-empty-nonfinal-shapes
+
+/// An empty non-final chunk is a legal boundary, and what it produces depends on
+/// where it sits.
+///
+/// First in a message the compressor has not flushed, so it emits the five-octet
+/// trailer; after a committed fragment it emits nothing at all. The pair is the
+/// known-positive control that the zero-output row is positional rather than dead
+/// code — one arm without the other cannot tell those apart.
+#[test]
+fn an_empty_non_final_fragment_is_legal_in_both_positions() {
+    // First fragment: no flush has happened yet.
+    let mut first = takeover_encoder();
+    let open = first.begin_streaming_message().expect("a stream");
+    let fragment = open.prepare_non_final_fragment(b"").expect("an empty boundary");
+    // Five octets, not four: the flush emits an empty block of its own -- the
+    // leading `0x00` -- and then the trailer that ends it. `== TRAILER` here
+    // would be asserting the wrong shape.
+    assert_eq!(
+        fragment.as_bytes(),
+        [0x00, 0x00, 0x00, 0xff, 0xff],
+        "a fresh compressor's empty flush is an empty block plus the trailer"
+    );
+    let (leading, next) = fragment.commit();
+    let mut fragments = vec![leading];
+    fragments.push(last_fragment(next, b"payload after an empty start"));
+    assert_eq!(
+        Verifier::new().accept(&on_the_wire(&fragments)).expect("a valid stream"),
+        b"payload after an empty start"
+    );
+
+    // Later: the previous fragment's flush already drained the compressor.
+    let mut later = takeover_encoder();
+    let open = later.begin_streaming_message().expect("a stream");
+    let (head, next) = open.prepare_non_final_fragment(b"head").expect("a fragment").commit();
+    let empty = next.prepare_non_final_fragment(b"").expect("an empty boundary");
+    assert!(empty.as_bytes().is_empty(), "a drained compressor's empty flush produces nothing");
+    let (nothing, next) = empty.commit();
+    let fragments = vec![head, nothing, last_fragment(next, b" and tail")];
+    assert_eq!(
+        Verifier::new().accept(&on_the_wire(&fragments)).expect("a valid stream"),
+        b"head and tail",
+        "committing after the empty continuation frame continues the message"
+    );
+
+    // Dropping either shape poisons, the same as any other unresolved state.
+    for chunk in [&b""[..], &b"head"[..]] {
+        let mut encoder = takeover_encoder();
+        let open = encoder.begin_streaming_message().expect("a stream");
+        drop(open.prepare_non_final_fragment(chunk).expect("a fragment"));
+        assert_eq!(encoder.prepare_message(b"after").expect_err("poisoned"), CodecError::Poisoned);
+    }
+}
+
+// ------------------------------------------- gate-single-fragment-equivalence
+
+/// A stream whose first fragment is final is `prepare_message` by another name.
+///
+/// Same bytes and the same history left behind, from the same encoder state. An
+/// equivalence check rather than an independent oracle: what it can catch is the
+/// refactor that gave the two producers different behaviour for one message.
+#[test]
+fn a_single_final_fragment_matches_the_whole_message_producer() {
+    let payloads: [Vec<u8>; 4] =
+        [Vec::new(), b"Hello".to_vec(), vec![b'r'; 30_000], incompressible(30_000, 83)];
+    for warm in [false, true] {
+        for payload in &payloads {
+            let mut whole = takeover_encoder();
+            let mut streamed = takeover_encoder();
+            if warm {
+                // The same history on both sides before the comparison.
+                let _ = send(&mut whole, b"a warming message");
+                let _ = send(&mut streamed, b"a warming message");
+            }
+
+            let expected = send(&mut whole, payload);
+            let fragments = stream(&mut streamed, &[payload.as_slice()]);
+            assert_eq!(fragments.len(), 1, "one chunk is one fragment");
+            assert_eq!(fragments[0], expected, "warm {warm}, {} bytes", payload.len());
+
+            // And the next message from each is identical too, which is the half
+            // that says the history matches and not merely the output.
+            assert_eq!(
+                send(&mut whole, b"the message after"),
+                send(&mut streamed, b"the message after"),
+                "warm {warm}, {} bytes: the histories diverged",
+                payload.len()
+            );
+        }
+    }
+}
+
+// ----------------------------------------------------------- gate-poison-states
+
+/// Every unresolved streaming state leaves the encoder poisoned, whether it is
+/// dropped or leaked.
+///
+/// `mem::forget` is the case the design exists for: no `Drop` impl runs, and the
+/// compressor is still gone because it lives inside the state rather than being
+/// put back by one. The fully committed stream at the end is the known positive —
+/// without it this row would pass on an encoder that poisoned unconditionally.
+#[test]
+fn an_unresolved_streaming_state_poisons_the_encoder() {
+    for leak in [false, true] {
+        // The stream itself, before any fragment.
+        let mut encoder = takeover_encoder();
+        let open = encoder.begin_streaming_message().expect("a stream");
+        if leak {
+            core::mem::forget(open);
+        } else {
+            drop(open);
+        }
+        assert_eq!(encoder.begin_streaming_message().expect_err("poisoned"), CodecError::Poisoned);
+        assert_eq!(encoder.prepare_message(b"after").expect_err("poisoned"), CodecError::Poisoned);
+
+        // A pending non-final fragment.
+        let mut encoder = takeover_encoder();
+        let open = encoder.begin_streaming_message().expect("a stream");
+        let pending: PreparedNonFinalFragment<'_> =
+            open.prepare_non_final_fragment(b"never sent").expect("a fragment");
+        if leak {
+            core::mem::forget(pending);
+        } else {
+            drop(pending);
+        }
+        assert_eq!(encoder.prepare_message(b"after").expect_err("poisoned"), CodecError::Poisoned);
+
+        // A pending final fragment.
+        let mut encoder = takeover_encoder();
+        let open = encoder.begin_streaming_message().expect("a stream");
+        let (_, next) = open.prepare_non_final_fragment(b"head").expect("a fragment").commit();
+        let pending: PreparedFinalFragment<'_> =
+            next.prepare_final_fragment(b"tail").expect("a final fragment");
+        if leak {
+            core::mem::forget(pending);
+        } else {
+            drop(pending);
+        }
+        assert_eq!(encoder.begin_streaming_message().expect_err("poisoned"), CodecError::Poisoned);
+    }
+
+    // The known positive: a stream carried all the way through leaves a working
+    // encoder, so the rows above are about resolution and not about streaming.
+    let mut encoder = takeover_encoder();
+    let fragments = stream(&mut encoder, &[b"head ", b"tail"]);
+    assert_eq!(
+        Verifier::new().accept(&on_the_wire(&fragments)).expect("a valid stream"),
+        b"head tail"
+    );
+    let _ = encoder.begin_streaming_message().expect("a committed stream leaves the encoder whole");
+}
+
+// ---------------------------------------------------------- gate-message-reset
+
+/// Fragment commits never reset; the final commit resets exactly when
+/// `no_context_takeover` was negotiated for this direction.
+///
+/// The discriminator is history dependence, not a flag: the second message
+/// repeats the first's payload, so under takeover it must compress smaller and
+/// needs the *same* inflater to decode, while under no-context it must not shrink
+/// and a *fresh* inflater must accept it. A reset on a non-final commit would
+/// show up as the streamed message's own later fragments losing their references.
+#[test]
+fn the_final_commit_resets_only_under_no_context_takeover() {
+    let body = incompressible(6_000, 137);
+    let mut repeated = body.clone();
+    repeated.extend_from_slice(&body);
+
+    // Takeover: one peer for the whole connection.
+    let mut encoder = client_codecs(15, 15, false, EncoderConfig::new());
+    let mut peer = Verifier::new();
+    let first = stream(&mut encoder, &[&repeated[..3_000], &repeated[3_000..]]);
+    assert_eq!(peer.accept(&on_the_wire(&first)).expect("valid"), repeated);
+    let second = stream(&mut encoder, &[&repeated[..3_000], &repeated[3_000..]]);
+    assert_eq!(peer.accept(&on_the_wire(&second)).expect("valid"), repeated);
+    let (first_len, second_len) = (first.concat().len(), second.concat().len());
+    assert!(
+        second_len < first_len,
+        "the second streamed message ignored retained history: {second_len} vs {first_len}"
+    );
+    // A whole message after a streamed one sees the same history.
+    let third = send(&mut encoder, &repeated);
+    assert_eq!(peer.accept(&third).expect("valid"), repeated);
+    assert!(third.len() < first_len, "a whole message after a stream lost the history");
+
+    // No context takeover: each message stands alone, so a fresh peer decodes
+    // the second one.
+    let mut encoder = client_codecs(15, 15, true, EncoderConfig::new());
+    let first = stream(&mut encoder, &[&repeated[..3_000], &repeated[3_000..]]);
+    assert_eq!(Verifier::new().accept(&on_the_wire(&first)).expect("valid"), repeated);
+    let second = stream(&mut encoder, &[&repeated[..3_000], &repeated[3_000..]]);
+    assert_eq!(
+        Verifier::new().accept(&on_the_wire(&second)).expect("a fresh inflater decodes it"),
+        repeated
+    );
+    assert_eq!(
+        second.concat().len(),
+        first.concat().len(),
+        "the reset did not return the second message to the first's size"
+    );
+}
+
+// ------------------------------------------------------ gate-own-decoder-compat
+
+/// This crate's own decoder accepts the fragments its encoder produces, one
+/// frame at a time with the final flag preserved.
+///
+/// A compatibility row and nothing more: a codec's two halves agreeing cannot
+/// tell a correct implementation from two matching mistakes, so the correctness
+/// credit belongs to `gate-composite-peer` and its direct `flate2` inflater.
+#[test]
+fn our_own_decoder_accepts_our_streamed_fragments() {
+    const ROOMY: DecompressedLimit = DecompressedLimit::bytes(1 << 20);
+    let sequences: [Vec<&[u8]>; 4] = [
+        vec![b"single"],
+        vec![b"head ", b"middle ", b"tail"],
+        vec![b"a message ending empty", b""],
+        vec![b"", b"a message starting empty"],
+    ];
+
+    for chunks in &sequences {
+        let (mut encoder, _) = client_pair(15, 15, false, EncoderConfig::new());
+        let (_, mut decoder) = client_pair(15, 15, false, EncoderConfig::new());
+
+        let fragments = stream(&mut encoder, chunks);
+        let mut recovered = Vec::new();
+        for (i, fragment) in fragments.iter().enumerate() {
+            let is_final = i + 1 == fragments.len();
+            recovered.extend_from_slice(
+                &decoder.decompress(fragment, is_final, ROOMY).expect("our decoder accepts it"),
+            );
+        }
+        assert_eq!(recovered, chunks.concat(), "{} fragments", chunks.len());
+
+        // And a second message on the same pair, so the row covers the history
+        // handed across a message boundary rather than one message in isolation.
+        let next = send(&mut encoder, b"the message after");
+        assert_eq!(
+            decoder.decompress(&next, true, ROOMY).expect("the second message"),
+            b"the message after"
+        );
+    }
+}
+
+// ------------------------------------------------------------ gate-stream-room
+
+/// Streaming fragments match a differently buffered producer of the same
+/// sequence, across the room function's branches.
+///
+/// The reference is buffered at 1 MiB rather than the crate's per-round room, so
+/// agreement is evidence rather than two copies of one buffering strategy. The
+/// scope is the whole-message rule applied per chunk: levels 1 through 9 are
+/// byte-identical everywhere, and level 0 only below the payload-derived branch,
+/// because above it zlib sizes each stored block from the room it was handed.
+/// Semantic validity is asserted everywhere regardless.
+#[test]
+fn streaming_fragments_match_a_differently_buffered_producer() {
+    // The room function's own branch edge, per chunk rather than per message.
+    const PAYLOAD_ROOM_BAND: usize = 131_008;
+
+    let sizes = [1usize, 5, 4_096, 16_384, 65_535, 65_536, 131_007, 131_072, 200_000];
+    // Three octets longer than the largest size, because the middle chunk is
+    // taken from just past it.
+    let body = incompressible(200_003, 251);
+    for level in 0..=9u32 {
+        for len in sizes {
+            let chunks: Vec<&[u8]> = vec![&body[..len], &body[len..len + 3], &body[..len]];
+            let config = EncoderConfig::new().compression_level(level).expect("zlib's domain");
+            let ours = stream(&mut client_codecs(15, 15, false, config), &chunks);
+            let aligned = direct_stream_aligned(level, 15, &chunks);
+
+            if level > 0 || len <= PAYLOAD_ROOM_BAND {
+                for (i, (fragment, reference)) in ours.iter().zip(&aligned).enumerate() {
+                    let is_final = i + 1 == ours.len();
+                    let expected = if is_final {
+                        assert!(reference.ends_with(TRAILER), "level {level}, {len}: no trailer");
+                        &reference[..reference.len() - TRAILER.len()]
+                    } else {
+                        reference.as_slice()
+                    };
+                    assert_eq!(
+                        fragment.len(),
+                        expected.len(),
+                        "level {level}, {len} bytes, fragment {i}: {} octets against {}",
+                        fragment.len(),
+                        expected.len()
+                    );
+                    assert_eq!(fragment.as_slice(), expected, "level {level}, {len}, fragment {i}");
+                }
+            }
+
+            assert_eq!(
+                Verifier::new().accept(&on_the_wire(&ours)).expect("a valid stream"),
+                chunks.concat(),
+                "level {level}, {len} bytes"
+            );
         }
     }
 }

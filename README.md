@@ -121,8 +121,36 @@ Two things about the sending side are easy to miss, and both are deliberate.
 RFC 7692 §7.2.1 permits two ways to build fragments: split the result of compressing the
 whole message, or build each fragment from the payload available so far. `prepare_message`
 implements the first, so it takes a whole message and the host splits the result into
-frames. The second — one encoder call per fragment — is a different algorithm, and this
-API cannot enter it.
+frames. `begin_streaming_message` implements the second, for a host that does not have the
+whole message:
+
+```rust
+use ws_pmd::EncoderConfig;
+
+let (mut encoder, _decoder) = negotiated.into_codecs(EncoderConfig::new());
+let mut stream = encoder.begin_streaming_message()?;
+
+// One frame per chunk. RSV1 on the first, FIN on none of them.
+for chunk in chunks {
+    let fragment = stream.prepare_non_final_fragment(chunk)?;
+    transport.write_all(fragment.as_bytes())?;
+    let (bytes, next) = fragment.commit();
+    stream = next;
+}
+
+// The last frame carries FIN, and only here is the trailer removed.
+let last = stream.prepare_final_fragment(tail)?;
+transport.write_all(last.as_bytes())?;
+let bytes = last.commit();
+```
+
+The two differ on the wire and in what they cost. A non-final fragment keeps every
+`00 00 ff ff` its flush produced — removing it is what §7.2.1 forbids there — while the final
+one has exactly the terminal four octets removed, or is the single `0x00` octet if the
+message produced nothing. Each fragment ends in a sync flush, so streaming a message in many
+small pieces compresses it less well than handing over the whole thing; use
+`prepare_message` whenever the message is already in memory. An empty non-final chunk is a
+legal boundary and may return no bytes at all, after an earlier fragment has already flushed.
 
 `PreparedMessage` is a transaction. Preparing a message moves the compressor out of the
 encoder and into the guard, so a candidate that may never reach the wire cannot quietly
@@ -131,6 +159,11 @@ advance this side's compression history. Calling `commit` returns the advanced h
 sends its original payload with RSV1 clear. Every other outcome — an error, a dropped
 guard, a cancelled write — leaves the encoder poisoned, because a host whose write was
 cancelled after an unknown number of octets cannot know what the peer received.
+
+The streaming states are the same transaction, one fragment at a time, with one difference:
+there is no `reset_to_plain`. Once a fragment has committed its octets are on the wire and
+the peer has inflated them, so the message cannot be re-sent uncompressed; an exit that
+stopped working part-way through a message would be worse than none.
 
 `DecompressedLimit` has no unbounded spelling. Compressed input is the one path where a
 small frame can ask for arbitrary memory, so a host whose plain-message setting is unbounded

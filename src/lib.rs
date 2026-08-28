@@ -81,7 +81,9 @@ mod server;
 pub use client::{ClientHandshake, ClientOffer};
 pub use codec::{Decoder, DecompressedLimit};
 pub use config::{ClientConfig, EncoderConfig, ServerConfig};
-pub use encoder::{Encoder, PreparedMessage};
+pub use encoder::{
+    Encoder, PreparedFinalFragment, PreparedMessage, PreparedNonFinalFragment, StreamingMessage,
+};
 pub use error::{CodecError, ConfigError, NegotiationError};
 pub use negotiated::{Negotiated, PmdComposition};
 pub use server::ServerHandshake;

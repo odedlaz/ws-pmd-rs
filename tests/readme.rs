@@ -37,10 +37,18 @@
 //!
 //! The bodies sit at column 0 and the wrappers are `#[rustfmt::skip]`, because the pin is a
 //! byte comparison and any reindentation would break it.
-// One signature serves all three blocks, so every wrapper takes all seven bindings and
+// One signature serves all four blocks, so every wrapper takes all nine bindings and
 // each block shadows or ignores the ones it does not use. That is the point, not an
-// oversight -- a per-block signature would be three preambles to keep in step.
-#![allow(unused_variables, unused_imports, unused_mut, clippy::needless_pass_by_value)]
+// oversight -- a per-block signature would be four preambles to keep in step. Nine is
+// past `too_many_arguments`' seven, and grouping them into a struct is not available:
+// the bodies are the README's bytes and they name these bindings bare.
+#![allow(
+    unused_variables,
+    unused_imports,
+    unused_mut,
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments
+)]
 
 use std::error::Error;
 use std::io::Write;
@@ -58,6 +66,8 @@ fn client(
     negotiated: Negotiated,
     payload: &[u8],
     fragment: &[u8],
+    chunks: Vec<&[u8]>,
+    tail: &[u8],
     is_final: bool,
     transport: &mut dyn Write,
 ) -> Result<(), Box<dyn Error>> {
@@ -85,6 +95,8 @@ fn server(
     negotiated: Negotiated,
     payload: &[u8],
     fragment: &[u8],
+    chunks: Vec<&[u8]>,
+    tail: &[u8],
     is_final: bool,
     transport: &mut dyn Write,
 ) -> Result<(), Box<dyn Error>> {
@@ -114,6 +126,8 @@ fn codecs(
     negotiated: Negotiated,
     payload: &[u8],
     fragment: &[u8],
+    chunks: Vec<&[u8]>,
+    tail: &[u8],
     is_final: bool,
     transport: &mut dyn Write,
 ) -> Result<(), Box<dyn Error>> {
@@ -132,6 +146,38 @@ let message = decoder.decompress(fragment, is_final, DecompressedLimit::bytes(1 
 Ok(())
 }
 
+#[rustfmt::skip]
+fn streaming(
+    request: HeaderMap,
+    response: HeaderMap,
+    negotiated: Negotiated,
+    payload: &[u8],
+    fragment: &[u8],
+    chunks: Vec<&[u8]>,
+    tail: &[u8],
+    is_final: bool,
+    transport: &mut dyn Write,
+) -> Result<(), Box<dyn Error>> {
+use ws_pmd::EncoderConfig;
+
+let (mut encoder, _decoder) = negotiated.into_codecs(EncoderConfig::new());
+let mut stream = encoder.begin_streaming_message()?;
+
+// One frame per chunk. RSV1 on the first, FIN on none of them.
+for chunk in chunks {
+    let fragment = stream.prepare_non_final_fragment(chunk)?;
+    transport.write_all(fragment.as_bytes())?;
+    let (bytes, next) = fragment.commit();
+    stream = next;
+}
+
+// The last frame carries FIN, and only here is the trailer removed.
+let last = stream.prepare_final_fragment(tail)?;
+transport.write_all(last.as_bytes())?;
+let bytes = last.commit();
+Ok(())
+}
+
 fn readme_rust_blocks() -> Vec<&'static str> {
     README
         .split("```rust\n")
@@ -144,9 +190,9 @@ fn readme_rust_blocks() -> Vec<&'static str> {
 #[test]
 fn every_readme_rust_block_is_pinned() {
     let blocks = readme_rust_blocks();
-    assert_eq!(blocks.len(), 3, "a rust block was added to or removed from the README");
+    assert_eq!(blocks.len(), 4, "a rust block was added to or removed from the README");
     for (i, block) in blocks.iter().enumerate() {
         assert!(SELF.contains(block), "README rust block {i} is not pinned in this file");
     }
-    let _ = (client, server, codecs);
+    let _ = (client, server, codecs, streaming);
 }

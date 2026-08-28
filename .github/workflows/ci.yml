@@ -108,6 +108,24 @@ jobs:
           RUSTFLAGS: -D warnings
         run: cargo test --locked --no-fail-fast
 
+  # The root suite again, resolved onto the C backend. Not a matrix over `test`:
+  # a matrix renames that check context, and it is the one branch protection
+  # already knows. Not covered by the `backend` job either -- those arms are the
+  # decoder's, they run their own manifests, and they never execute
+  # `tests/encoder.rs`, so without this the encoder's claims hold on one backend
+  # only.
+  test-c-zlib:
+    name: test-c-zlib
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked --no-default-features --features zlib --no-fail-fast
+
   rustdoc:
     name: rustdoc
     runs-on: ubuntu-latest
@@ -459,6 +477,7 @@ jobs:
       - fmt
       - clippy
       - test
+      - test-c-zlib
       - rustdoc
       - msrv
       - package

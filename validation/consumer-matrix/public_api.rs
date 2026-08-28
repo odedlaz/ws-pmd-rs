@@ -15,6 +15,7 @@ use std::thread;
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use ws_pmd::{
     ClientConfig, ClientOffer, Decoder, DecompressedLimit, Encoder, EncoderConfig, PmdComposition,
+    PreparedFinalFragment, PreparedNonFinalFragment, StreamingMessage,
 };
 
 const ROOMY: DecompressedLimit = DecompressedLimit::bytes(1 << 20);
@@ -27,6 +28,14 @@ const ROOMY: DecompressedLimit = DecompressedLimit::bytes(1 << 20);
 const fn require_send<T: Send>() {}
 const _: () = require_send::<Encoder>();
 const _: () = require_send::<Decoder>();
+
+// The streaming states cross the same boundary, and for a sharper reason: a host
+// that writes a fragment before committing it holds one of these across an
+// await, so `!Send` here would not be a missing convenience but an API a runtime
+// cannot use. `Sync` is absent for all three, deliberately, as it is above.
+const _: () = require_send::<StreamingMessage<'static>>();
+const _: () = require_send::<PreparedNonFinalFragment<'static>>();
+const _: () = require_send::<PreparedFinalFragment<'static>>();
 
 /// An agreement built by running the real handshake, because there is no other
 /// way in -- local configuration cannot be turned into a codec directly.
@@ -107,4 +116,54 @@ fn a_bidirectional_host_splits_the_pair_across_threads() {
     assert_eq!(one, payload, "the masked-and-unmasked message");
     assert_eq!(two, b"after the reset", "the message after a discarded candidate");
     println!("PUBLIC_API=bidirectional-ok");
+}
+
+/// A streaming host: it does not have the whole message, and it writes each
+/// fragment before saying so.
+///
+/// The `thread::scope` is standing in for an await. A prepared fragment borrows
+/// the encoder, so it cannot be sent to a detached thread at all -- what a real
+/// async host does is hold it across a suspension point, and moving it into a
+/// scoped thread is the closest a synchronous consumer can come to that. The
+/// static assertions above carry the bound; this carries the move.
+#[test]
+fn a_streaming_host_writes_each_fragment_before_committing_it() {
+    let (mut encoder, mut decoder) = codecs();
+    let chunks: [&[u8]; 3] = [b"a message the host ", b"never holds ", b"in one piece"];
+
+    let mut wire = Vec::new();
+    let mut stream = encoder.begin_streaming_message().expect("a stream");
+    for chunk in &chunks[..2] {
+        let mut fragment = stream.prepare_non_final_fragment(chunk).expect("a fragment");
+        let written = thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    // The reversible transform a client applies, then the write,
+                    // and only then the commit.
+                    let mask = [0x5eu8, 0x11, 0xc3, 0x80];
+                    for (i, byte) in fragment.as_bytes_mut().iter_mut().enumerate() {
+                        *byte ^= mask[i % 4];
+                    }
+                    let (mut bytes, next) = fragment.commit();
+                    for (i, byte) in bytes.iter_mut().enumerate() {
+                        *byte ^= mask[i % 4];
+                    }
+                    (bytes, next)
+                })
+                .join()
+                .expect("the fragment crossed the boundary")
+        });
+        wire.push(written.0);
+        stream = written.1;
+    }
+    wire.push(stream.prepare_final_fragment(chunks[2]).expect("a final fragment").commit());
+
+    let mut recovered = Vec::new();
+    for (i, fragment) in wire.iter().enumerate() {
+        recovered.extend_from_slice(
+            &decoder.decompress(fragment, i + 1 == wire.len(), ROOMY).expect("decodes"),
+        );
+    }
+    assert_eq!(recovered, chunks.concat(), "the streamed message, fragment by fragment");
+    println!("PUBLIC_API=streaming-ok");
 }

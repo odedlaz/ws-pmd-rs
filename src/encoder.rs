@@ -1,24 +1,34 @@
-//! The compressor for one connection, in one direction, and the transaction
-//! that decides whether its output reached the wire.
+//! The compressor for one connection, in one direction, and the two
+//! transactions that decide whether its output reached the wire.
 //!
 //! RFC 7692 section 7.2.1 defines the producer side as three steps over a
 //! *complete* message: deflate it, end it with an empty uncompressed block, then
 //! remove that block's four trailing octets. The same section permits two ways
-//! to build fragments. This module implements the first: an endpoint "fragments
-//! a compressed message by splitting the result of running this algorithm", so
-//! the encoder takes a whole message and the host owns framing. In the second,
-//! "even when only part of the payload is available, a fragment can be built by
-//! compressing the available data" and byte-aligning its end; that is the
-//! strategy the adjacent MUST NOT governs, keeping `00 00 ff ff` on every
-//! non-final fragment. It is a different algorithm, and nothing here can
-//! enter it.
+//! to build fragments from that, and this module implements both.
+//!
+//! [`Encoder::prepare_message`] is the first: an endpoint "fragments a
+//! compressed message by splitting the result of running this algorithm", so it
+//! takes a whole message, runs all three steps once, and the host splits what
+//! comes back. [`Encoder::begin_streaming_message`] is the second: "even when
+//! only part of the payload is available, a fragment can be built by compressing
+//! the available data" and byte-aligning its end. There steps 1 and 2 run per
+//! fragment and step 3 runs only on the last, which is what the adjacent MUST
+//! NOT requires -- `00 00 ff ff` stays on every non-final fragment.
 //!
 //! Compression history is the peer's problem as much as ours, so a candidate
-//! that may not reach the wire cannot be produced and forgotten. Preparing a
-//! message moves the compressor *out* of the encoder and into the returned
-//! guard; only committing it or falling back to plain puts it back. Every other
-//! outcome -- an error, a dropped guard, a cancelled write, even a leaked guard
-//! -- leaves the encoder vacant, and vacant is poisoned.
+//! that may not reach the wire cannot be produced and forgotten. Preparing
+//! anything moves the compressor *out* of the encoder and into the returned
+//! state; only resolving that state puts it back. Every other outcome -- an
+//! error, a dropped guard, a cancelled write, even a leaked guard -- leaves the
+//! encoder vacant, and vacant is poisoned.
+//!
+//! What the two do not share is an exit. A whole-message candidate can still be
+//! abandoned: [`PreparedMessage::reset_to_plain`] throws away the history it
+//! advanced and the host sends its payload with RSV1 clear. A stream has no such
+//! answer once its first fragment commits, because by then those octets are on
+//! the wire and the peer has inflated them. So streaming offers no fallback at
+//! all, rather than one that silently stops being available part-way through a
+//! message.
 
 use flate2::{Compress, FlushCompress, Status};
 
@@ -38,15 +48,22 @@ use crate::negotiated::Negotiated;
 /// is re-armed as incomplete, so the next call appends a *second* empty stored
 /// block. That output is valid wire and decodes correctly, so no round trip can
 /// see it -- only a length or byte comparison can, and at 4 KiB most large
-/// level-0 messages carried one.
+/// level-0 payload chunks carried one.
+///
+/// The ceiling branch is charged per *produced chunk* and not per WebSocket
+/// message, which is what lets one constant serve both producers: a call that
+/// completes a flush has to fit one maximal stored block and its header with
+/// room left, and that bound is the same whether the chunk is a whole message or
+/// one fragment of a streamed one. A previous *intermediate* round may still
+/// leave pending output behind, and [`sync_flush`] already repeats for that.
 ///
 /// Lowering this is therefore not a tuning choice. Raising it does **not** make
 /// the output buffer-independent, and must not be read as saying so: zlib sizes
-/// each level-0 stored block from the room it is handed, so a message needing
+/// each level-0 stored block from the room it is handed, so a chunk needing
 /// more than one round emits one more block header than an unbounded compressor
 /// would. There is no fixed value above which that stops -- the first affected
 /// size tracks this constant, measured at three ceilings -- and removing it would
-/// mean reserving every message in full, taxing the compressible common case to
+/// mean reserving every chunk in full, taxing the compressible common case to
 /// tidy the incompressible one. What is byte-identical at every size measured is
 /// levels 1 through 9, plus level 0 below the payload-derived branch, and that is
 /// exactly the scope `the_encoder_matches_a_differently_buffered_compressor`
@@ -58,9 +75,10 @@ const BLOCK_ROOM: usize = 1 << 17;
 /// ambiguous one. Enforced because the failure it prevents is silent.
 const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored block");
 
-/// Slack above a payload's own length, for the room the completing flush needs.
+/// Slack above a payload chunk's own length, for the room the completing flush
+/// needs.
 ///
-/// Not a bound on what DEFLATE adds to a message, which is the reading to avoid:
+/// Not a bound on what DEFLATE adds to a chunk, which is the reading to avoid:
 /// zlib-rs at level 1 expands incompressible input by about 5.5%, so the output
 /// routinely exceeds `payload + 64` and level 0 is the *narrowest* case rather
 /// than the widest. The room never has to cover the output, because [`drive`]
@@ -68,13 +86,18 @@ const _: () = assert!(BLOCK_ROOM > 65_540, "a round must hold one maximal stored
 /// call that *completes* the flush has to fit, and what it emits is bounded by
 /// what the backend still holds, not by the message.
 ///
+/// That residue is per chunk rather than per message, which is why streaming
+/// needs no second number: each fragment ends in a sync flush that drains the
+/// compressor, so whatever the next call has to frame was produced by the next
+/// chunk alone.
+///
 /// So this is a measured bound on that residue rather than a derived one, and it
 /// is comfortable rather than tight: consumption is `5 x blocks + 5`, and at most
 /// two blocks fit below the branch edge, so it is ten or fifteen octets and the
 /// worst case leaves 49 of the 64 unused -- bounded by arithmetic, not by the
 /// sizes that happened to be sampled, and identical on both locked backends. It
 /// is nonetheless load-bearing at level 0 alone, because there the flush drains
-/// the whole stored message and one octet short appends a redundant block, while
+/// the whole stored chunk and one octet short appends a redundant block, while
 /// at levels 1 through 9 the compressed residue leaves thousands spare and the
 /// margin cannot be observed at all.
 ///
@@ -87,9 +110,14 @@ const FRAMING_MARGIN: usize = 64;
 
 /// Output room to request per round, for a message of this size.
 ///
+/// Called with each chunk's own length: a whole message for
+/// [`Encoder::prepare_message`], one fragment's payload for each streaming
+/// prepare.
+///
 /// [`BLOCK_ROOM`] is a ceiling rather than a fixed request, because it is charged
-/// per message and not per connection: a host sending short frames would
-/// otherwise ask the allocator for 128 KiB to hold seven octets.
+/// per produced fragment or complete message and not per connection: a host
+/// sending short frames would otherwise ask the allocator for 128 KiB to hold
+/// seven octets.
 ///
 /// Neither case is a request to hold the whole output, which is the reading to
 /// avoid: [`drive`] re-reserves every round, so a short room costs rounds rather
@@ -98,7 +126,7 @@ const FRAMING_MARGIN: usize = 64;
 /// *completes* the flush.
 ///
 /// Below the ceiling that residue is bounded by the payload, because at level 0
-/// the flush drains the whole stored message, and [`FRAMING_MARGIN`] covers its
+/// the flush drains the whole stored chunk, and [`FRAMING_MARGIN`] covers its
 /// framing with room to spare: two maximal stored blocks reach 131,070, so at most
 /// two block headers fit below the branch edge and consumption is `5 x blocks + 5`
 /// -- ten or fifteen octets, by arithmetic rather than by sampling. At or above the
@@ -219,6 +247,67 @@ impl Encoder {
         let bytes = produce(&mut compressor, payload)?;
         Ok(PreparedMessage { encoder: self, compressor, bytes })
     }
+
+    /// Begin a message whose payload the host does not have in full.
+    ///
+    /// The other producer RFC 7692 section 7.2.1 permits: each fragment is
+    /// compressed from the bytes available when the host asks, instead of one
+    /// compressed message being sliced afterwards. Use it when the source is a
+    /// stream and holding the whole message to compress it is what you are
+    /// trying to avoid; use [`prepare_message`](Self::prepare_message) whenever
+    /// the message is already in memory, because a flush per fragment costs
+    /// ratio.
+    ///
+    /// This takes the compressor and makes no backend call, so beginning a
+    /// stream is not itself compression -- but it *is* already the point of no
+    /// return for the encoder, exactly as preparing a whole message is. The
+    /// returned state must reach
+    /// [`prepare_final_fragment`](StreamingMessage::prepare_final_fragment) and
+    /// commit, or this direction is poisoned.
+    ///
+    /// Everything on the wire stays the host's: which bytes go in a fragment,
+    /// the continuation opcodes, FIN, RSV1 on the first data frame only, and
+    /// masking.
+    ///
+    /// ```
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+    /// #     .expect("a fresh map");
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let agreed = offer
+    /// #     .seal(&request)
+    /// #     .expect("the offer is unchanged")
+    /// #     .finish(&response, PmdComposition::Compatible)
+    /// #     .expect("the response is legal")
+    /// #     .expect("the server selected it");
+    /// # let (mut encoder, _decoder) = agreed.into_codecs(EncoderConfig::new());
+    /// # let mut wire: Vec<Vec<u8>> = Vec::new();
+    /// let mut stream = encoder.begin_streaming_message()?;
+    ///
+    /// // One continuation frame per chunk. RSV1 on the first, FIN on none.
+    /// for chunk in [&b"the first half "[..], &b"and the second"[..]] {
+    ///     let fragment = stream.prepare_non_final_fragment(chunk)?;
+    ///     wire.push(fragment.as_bytes().to_vec()); // write it, then commit
+    ///     let (_bytes, next) = fragment.commit();
+    ///     stream = next;
+    /// }
+    ///
+    /// // The last frame carries FIN, and only here is the trailer removed.
+    /// let last = stream.prepare_final_fragment(b"!")?;
+    /// wire.push(last.as_bytes().to_vec());
+    /// let _bytes = last.commit();
+    /// # Ok::<(), ws_pmd::CodecError>(())
+    /// ```
+    pub fn begin_streaming_message(&mut self) -> Result<StreamingMessage<'_>, CodecError> {
+        let compressor = self.compressor.take().ok_or(CodecError::Poisoned)?;
+        Ok(StreamingMessage { encoder: self, compressor })
+    }
 }
 
 /// A compressed message that has not yet been declared sent or discarded.
@@ -287,6 +376,395 @@ impl PreparedMessage<'_> {
     }
 }
 
+/// A message being compressed a fragment at a time, between fragments.
+///
+/// Holds the compressor while it is neither in the encoder nor in a prepared
+/// fragment, so the encoder is vacant for as long as this exists. There is
+/// exactly one of these per message and it is consumed by preparing a fragment:
+/// fragment N+1 cannot be started until N resolves, because preparing N took the
+/// only value that can start another.
+///
+/// Dropping or forgetting it is the terminal outcome, and there is no
+/// `reset_to_plain` counterpart. Once any fragment has committed, its octets are
+/// on the wire and the peer has inflated them, so this side cannot decide the
+/// message will be sent uncompressed instead; offering that exit only before the
+/// first commit would be an escape hatch that stops working part-way through a
+/// message, which is worse than not having one.
+/// # Linearity, and what it refuses
+///
+/// Preparing a fragment consumes this, so there is no live parent while one is
+/// unresolved and fragment N+1 cannot be started before N commits:
+///
+/// ```compile_fail,E0382
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let pending = open.prepare_non_final_fragment(b"first")?;
+/// let second = open.prepare_non_final_fragment(b"second")?;
+/// # let _ = (pending, second);
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+///
+/// The same setup, one line apart, with the commit that makes it legal:
+///
+/// ```
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let pending = open.prepare_non_final_fragment(b"first")?;
+/// let (_bytes, open) = pending.commit();
+/// let second = open.prepare_non_final_fragment(b"second")?;
+/// # let _ = second;
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+///
+/// Continuing after FIN is not rejected at runtime -- the final commit returns
+/// bytes and nothing else, so there is no state to continue from:
+///
+/// ```compile_fail,E0599
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let last = open.prepare_final_fragment(b"the end")?;
+/// let more = last.commit().prepare_non_final_fragment(b"after FIN")?;
+/// # let _ = more;
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+///
+/// Starting a *new* message is how a host goes on, and it compiles:
+///
+/// ```
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let last = open.prepare_final_fragment(b"the end")?;
+/// let _bytes = last.commit();
+/// let more = encoder.begin_streaming_message()?.prepare_non_final_fragment(b"a new message")?;
+/// # let _ = more;
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+///
+/// And a consumed state cannot be read again afterwards:
+///
+/// ```compile_fail,E0382
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let pending = open.prepare_non_final_fragment(b"first")?;
+/// let (_bytes, open) = pending.commit();
+/// let spare = pending.as_bytes().to_vec();
+/// # let _ = (open, spare);
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+///
+/// Reading it before the commit is the supported order:
+///
+/// ```
+/// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+/// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+/// # let mut request = HeaderMap::new();
+/// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+/// #     .expect("a fresh map");
+/// # let mut response = HeaderMap::new();
+/// # response.append(
+/// #     SEC_WEBSOCKET_EXTENSIONS,
+/// #     HeaderValue::from_static("permessage-deflate"),
+/// # );
+/// # let (mut encoder, _decoder) = offer
+/// #     .seal(&request)
+/// #     .expect("the offer is unchanged")
+/// #     .finish(&response, PmdComposition::Compatible)
+/// #     .expect("the response is legal")
+/// #     .expect("the server selected it")
+/// #     .into_codecs(EncoderConfig::new());
+/// let open = encoder.begin_streaming_message()?;
+/// let pending = open.prepare_non_final_fragment(b"first")?;
+/// let spare = pending.as_bytes().to_vec();
+/// let (_bytes, open) = pending.commit();
+/// # let _ = (open, spare);
+/// # Ok::<(), ws_pmd::CodecError>(())
+/// ```
+#[must_use = "an unresolved streaming message poisons the encoder"]
+#[derive(Debug)]
+pub struct StreamingMessage<'encoder> {
+    encoder: &'encoder mut Encoder,
+    compressor: Compress,
+}
+
+impl<'encoder> StreamingMessage<'encoder> {
+    /// Compress the next chunk into a fragment that is not the last.
+    ///
+    /// RFC 7692 section 7.2.1 steps 1 and 2 only. Step 3 -- removing the
+    /// terminal `00 00 ff ff` -- is what the section's MUST NOT forbids here, so
+    /// every trailer this produces stays in the returned bytes and goes on the
+    /// wire. The host frames these as a data frame with RSV1 and FIN clear, or a
+    /// continuation frame, and never sets FIN.
+    ///
+    /// An empty chunk is legal and is a real fragment: the host is declaring a
+    /// boundary, and the empty WebSocket continuation frame it produces is one
+    /// the peer must accept. What comes back depends on position rather than on
+    /// input -- the five-octet trailer from a compressor that has not just
+    /// flushed, no bytes at all from one that has -- and both are conforming. A
+    /// source that is *temporarily* empty is not a boundary: skip the call and
+    /// wait for bytes, or call
+    /// [`prepare_final_fragment`](Self::prepare_final_fragment) at end of
+    /// source.
+    ///
+    /// Failing here poisons the encoder, the same as dropping the stream.
+    pub fn prepare_non_final_fragment(
+        self,
+        payload: &[u8],
+    ) -> Result<PreparedNonFinalFragment<'encoder>, CodecError> {
+        let Self { encoder, mut compressor } = self;
+        // As in `prepare_message`: the error path drops `compressor` here, and
+        // that is what makes the failure terminal without a flag to maintain.
+        let bytes = produce_non_final(&mut compressor, payload)?;
+        Ok(PreparedNonFinalFragment { encoder, compressor, bytes })
+    }
+
+    /// Compress the last chunk and end the message.
+    ///
+    /// All three steps, exactly as [`Encoder::prepare_message`] runs them over a
+    /// whole message: the terminal `00 00 ff ff` is removed here and only here,
+    /// and a chunk that produces nothing becomes RFC 7692 section 7.2.3.6's
+    /// single `0x00` octet. The host frames the result with FIN set.
+    ///
+    /// Consuming the stream is what ends the message. There is no state to
+    /// continue from afterwards, so a fragment after FIN is not something to
+    /// reject at runtime -- it does not typecheck.
+    pub fn prepare_final_fragment(
+        self,
+        payload: &[u8],
+    ) -> Result<PreparedFinalFragment<'encoder>, CodecError> {
+        let Self { encoder, mut compressor } = self;
+        let bytes = produce(&mut compressor, payload)?;
+        Ok(PreparedFinalFragment { encoder, compressor, bytes })
+    }
+}
+
+/// A non-final fragment that has not yet been declared sent.
+///
+/// The same transaction as [`PreparedMessage`], one fragment wide, and with no
+/// discard arm: see [`StreamingMessage`] for why streaming has no
+/// `reset_to_plain`.
+#[must_use = "an unresolved fragment poisons the encoder"]
+#[derive(Debug)]
+pub struct PreparedNonFinalFragment<'encoder> {
+    encoder: &'encoder mut Encoder,
+    compressor: Compress,
+    bytes: Vec<u8>,
+}
+
+impl<'encoder> PreparedNonFinalFragment<'encoder> {
+    /// The candidate fragment payload, with every `00 00 ff ff` the flush
+    /// produced still on it.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The candidate fragment payload, mutably, for a reversible transport
+    /// transform such as client masking.
+    #[must_use]
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    /// Declare that this fragment appeared on the wire, and take it along with
+    /// the state that prepares the next one.
+    ///
+    /// Call it once the whole frame has been written, or inserted into a queue
+    /// that cannot reject it -- reading the bytes is not sending them. That is
+    /// as true of an empty fragment as of any other: the frame header is the
+    /// boundary the peer sees, so commit follows the header rather than the
+    /// payload.
+    ///
+    /// Never resets the compressor. `no_context_takeover` is negotiated per
+    /// *message*, and this is the middle of one.
+    ///
+    /// # Discarding it
+    ///
+    /// The returned tuple carries the only value that can prepare the next
+    /// fragment, so dropping it on the floor is the one mistake this shape
+    /// cannot make unrepresentable. Under `deny(unused_must_use)` it is a build
+    /// failure:
+    ///
+    /// ```compile_fail
+    /// #![deny(unused_must_use)]
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+    /// #     .expect("a fresh map");
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let (mut encoder, _decoder) = offer
+    /// #     .seal(&request)
+    /// #     .expect("the offer is unchanged")
+    /// #     .finish(&response, PmdComposition::Compatible)
+    /// #     .expect("the response is legal")
+    /// #     .expect("the server selected it")
+    /// #     .into_codecs(EncoderConfig::new());
+    /// let open = encoder.begin_streaming_message()?;
+    /// let pending = open.prepare_non_final_fragment(b"first")?;
+    /// pending.commit();
+    /// # Ok::<(), ws_pmd::CodecError>(())
+    /// ```
+    ///
+    /// Binding both halves is all it takes:
+    ///
+    /// ```
+    /// #![deny(unused_must_use)]
+    /// # use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
+    /// # use ws_pmd::{ClientConfig, ClientOffer, EncoderConfig, PmdComposition};
+    /// # let mut request = HeaderMap::new();
+    /// # let offer = ClientOffer::install(ClientConfig::new(), &mut request)
+    /// #     .expect("a fresh map");
+    /// # let mut response = HeaderMap::new();
+    /// # response.append(
+    /// #     SEC_WEBSOCKET_EXTENSIONS,
+    /// #     HeaderValue::from_static("permessage-deflate"),
+    /// # );
+    /// # let (mut encoder, _decoder) = offer
+    /// #     .seal(&request)
+    /// #     .expect("the offer is unchanged")
+    /// #     .finish(&response, PmdComposition::Compatible)
+    /// #     .expect("the response is legal")
+    /// #     .expect("the server selected it")
+    /// #     .into_codecs(EncoderConfig::new());
+    /// let open = encoder.begin_streaming_message()?;
+    /// let pending = open.prepare_non_final_fragment(b"first")?;
+    /// let (_bytes, _open) = pending.commit();
+    /// # Ok::<(), ws_pmd::CodecError>(())
+    /// ```
+    #[must_use = "dropping the returned stream poisons the encoder"]
+    pub fn commit(self) -> (Vec<u8>, StreamingMessage<'encoder>) {
+        let Self { encoder, compressor, bytes } = self;
+        (bytes, StreamingMessage { encoder, compressor })
+    }
+}
+
+/// The last fragment of a streamed message, before it is declared sent.
+///
+/// Committing it is what restores the encoder, so this is the only state in the
+/// streaming sequence whose resolution ends the message.
+#[must_use = "an unresolved fragment poisons the encoder"]
+#[derive(Debug)]
+pub struct PreparedFinalFragment<'encoder> {
+    encoder: &'encoder mut Encoder,
+    compressor: Compress,
+    bytes: Vec<u8>,
+}
+
+impl PreparedFinalFragment<'_> {
+    /// The candidate final payload: the four-octet trailer already removed, or
+    /// the RFC's `0x00` if the message ended without producing any.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The candidate final payload, mutably, for a reversible transport
+    /// transform such as client masking.
+    #[must_use]
+    pub fn as_bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    /// Declare that the final fragment appeared on the wire, end the message,
+    /// and return the encoder to a state that can start another.
+    ///
+    /// The negotiated `no_context_takeover` reset happens here, because here is
+    /// where the message ends.
+    #[must_use]
+    pub fn commit(self) -> Vec<u8> {
+        let Self { encoder, mut compressor, bytes } = self;
+        if encoder.reset_between_messages {
+            reset(&mut compressor);
+        }
+        encoder.compressor = Some(compressor);
+        bytes
+    }
+}
+
 /// Start this side's compression history over.
 ///
 /// `Compress::reset` is the whole operation at every negotiated width, which is
@@ -301,12 +779,23 @@ fn reset(compressor: &mut Compress) {
     compressor.reset();
 }
 
-/// RFC 7692 section 7.2.1 steps 1 through 3, for one complete message.
-fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+/// RFC 7692 section 7.2.1 steps 1 and 2, over one payload chunk.
+///
+/// Everything the two producers share, ending exactly where they stop agreeing:
+/// a complete message and a final fragment go on to step 3, and a non-final
+/// fragment is forbidden from it.
+fn produce_aligned(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
     let room = room_for(payload.len());
     let mut output = Vec::new();
     feed(compressor, payload, &mut output, room)?;
     sync_flush(compressor, &mut output, room)?;
+    Ok(output)
+}
+
+/// RFC 7692 section 7.2.1 steps 1 through 3, for one complete message or for the
+/// final fragment of a streamed one.
+fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let output = produce_aligned(compressor, payload)?;
     let mut message = strip_or_synthesize(payload, output)?;
     // A round reserves room for what the message could produce and a short one
     // needs almost none of it, so the returned vector would otherwise carry that
@@ -316,6 +805,29 @@ fn produce(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecEr
     // without claiming it comes back.
     message.shrink_to_fit();
     Ok(message)
+}
+
+/// Steps 1 and 2 with step 3 deliberately not run, for a fragment that is not
+/// the last.
+///
+/// RFC 7692 section 7.2.1: the trailer "MUST NOT" be removed from a non-final
+/// fragment, so every `00 00 ff ff` the flush produced is kept -- including a
+/// mid-payload one, which is why this checks a tail and never searches.
+///
+/// The one case with no tail to check is a chunk the backend answered with
+/// nothing. That happens for empty input after a flush that has already drained
+/// the compressor, and it is legal: the fragment carries no payload and the
+/// frame header is what marks the boundary. No bytes for a chunk that *had*
+/// bytes is a fault, exactly as it is for a whole message.
+fn produce_non_final(compressor: &mut Compress, payload: &[u8]) -> Result<Vec<u8>, CodecError> {
+    let mut fragment = produce_aligned(compressor, payload)?;
+    let aligned = fragment.ends_with(TRAILER) || (payload.is_empty() && fragment.is_empty());
+    if !aligned {
+        return Err(CodecError::CompressionFailed);
+    }
+    // The same reservation slack, given back for the same reason as in `produce`.
+    fragment.shrink_to_fit();
+    Ok(fragment)
 }
 
 /// Step 1: the whole payload into raw DEFLATE, holding nothing back.
@@ -348,14 +860,22 @@ fn feed(
 /// next message may reference.
 ///
 /// The loop repeats the flush while a call returns with no output room left,
-/// because that is zlib's documented protocol for a flush that did not fit. It
-/// is not a free repetition: zlib cannot signal "complete" apart from "the
-/// buffer filled exactly", so it sets `last_flush = -1` on a full return and a
-/// repeat becomes a *new* sync flush, which on an already-drained stream appends
-/// a second empty stored block. [`BLOCK_ROOM`] is what keeps the first call from
-/// ever being the ambiguous one; the loop remains for a backend holding more
-/// pending output than that, which would get the redundant block -- valid wire,
-/// never a wrong stream.
+/// because that is zlib's documented protocol for a flush that did not fit.
+///
+/// Two different rounds can fill the room, and only one of them is a problem. An
+/// *intermediate* round -- the backend still holds pending output -- has to be
+/// repeated, and the repeat drains what is left; that is the case this loop
+/// exists for, and it was measured: zlib-rs at level 1 with a 4,096-byte chunk
+/// on macOS/aarch64 took two rounds, `(4,160, 4,160)` then `(167, 4,160)`, and
+/// came out byte-identical to the same code given effectively unbounded room, so
+/// the repeat drained pending output and added nothing. A *completing* round that
+/// happens to fill the room exactly is the ambiguous one: zlib cannot signal
+/// "complete" apart from "the buffer filled exactly", so it sets
+/// `last_flush = -1` and the repeat becomes a *new* sync flush, which on an
+/// already-drained stream appends a second empty stored block. [`BLOCK_ROOM`] is
+/// what keeps a completing call from ever being that round; the loop remains for
+/// a backend holding more pending output than that, which would get the
+/// redundant block -- valid wire, never a wrong stream.
 fn sync_flush(
     compressor: &mut Compress,
     output: &mut Vec<u8>,

@@ -90,7 +90,7 @@ EOF
     api=$(printf '%s\n' "$output" \
         | { grep -o 'PUBLIC_API=[a-z-]*' || true; } | sort -u | wc -l | tr -d ' ')
 
-    printf '  %-30s sys=[%-28s] behaviour=%-9s public-api=%s/2 suite=%s\n' \
+    printf '  %-30s sys=[%-28s] behaviour=%-9s public-api=%s/3 suite=%s\n' \
         "$name" "$sys" "${behaviour:-DID NOT RUN}" "$api" "$rc"
     if [ "$sys" != "$want_sys" ]; then
         printf '    FAIL provenance: wanted [%s]\n' "$want_sys" >&2
@@ -100,10 +100,12 @@ EOF
         printf '    FAIL suite: cargo test exited %s -- a row not covered by a marker failed\n' "$rc" >&2
         failures=$((failures + 1))
     fi
-    # Both public-API rows must report. A count rather than a presence check,
-    # because one marker plus one failure reads the same as a pass otherwise.
-    if [ "$api" != "2" ]; then
-        printf '    FAIL public API: %s of 2 rows reported -- the published surface does not build this consumer\n' "$api" >&2
+    # All three public-API rows must report. A count rather than a presence
+    # check, because two markers plus one failure reads the same as a pass
+    # otherwise -- and a row added without moving this number fails every graph,
+    # which is the direction to fail in.
+    if [ "$api" != "3" ]; then
+        printf '    FAIL public API: %s of 3 rows reported -- the published surface does not build this consumer\n' "$api" >&2
         failures=$((failures + 1))
     fi
     if [ -z "$behaviour" ]; then

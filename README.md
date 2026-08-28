@@ -130,7 +130,8 @@ use ws_pmd::EncoderConfig;
 let (mut encoder, _decoder) = negotiated.into_codecs(EncoderConfig::new());
 let mut stream = encoder.begin_streaming_message()?;
 
-// One frame per chunk. RSV1 on the first, FIN on none of them.
+// The first frame carries the message opcode and RSV1; the rest are
+// continuations. FIN on none of them.
 for chunk in chunks {
     let fragment = stream.prepare_non_final_fragment(chunk)?;
     transport.write_all(fragment.as_bytes())?;
@@ -145,13 +146,17 @@ let bytes = last.commit();
 ```
 
 The two differ on the wire and in what they cost. A non-final fragment keeps every
-`00 00 ff ff` its flush produced — removing it is what §7.2.1 forbids there — while the final
-one has exactly the terminal four octets removed, or is the single `0x00` octet when that
-last flush produced nothing — which happens after an earlier fragment has already drained
-the compressor, not only for a message that was empty all along. Each fragment ends in a sync flush, so streaming a message in many
-small pieces compresses it less well than handing over the whole thing; use
-`prepare_message` whenever the message is already in memory. An empty non-final chunk is a
-legal boundary and may return no bytes at all, after an earlier fragment has already flushed.
+`00 00 ff ff` its flush produced — removing it is what §7.2.1 forbids there — while the
+final one has exactly the terminal four octets removed. Each fragment ends in a sync
+flush, so streaming a message in many small pieces compresses it less well than handing
+over the whole thing; use `prepare_message` whenever the message is already in memory.
+
+An empty chunk is a legal boundary, and what it returns depends on where it sits rather
+than on the chunk. An empty *final* chunk is §7.2.3.6's single `0x00` octet, whether it is
+the whole message or follows fragments that carried bytes. An empty *non-final* chunk is
+`00 00 00 ff ff` while the compressor has not flushed yet — five octets, an empty DEFLATE
+block and the trailer that ends it — and no bytes at all once an earlier fragment has
+drained it.
 
 `PreparedMessage` is a transaction. Preparing a message moves the compressor out of the
 encoder and into the guard, so a candidate that may never reach the wire cannot quietly

@@ -163,7 +163,8 @@ use ws_pmd::EncoderConfig;
 let (mut encoder, _decoder) = negotiated.into_codecs(EncoderConfig::new());
 let mut stream = encoder.begin_streaming_message()?;
 
-// One frame per chunk. RSV1 on the first, FIN on none of them.
+// The first frame carries the message opcode and RSV1; the rest are
+// continuations. FIN on none of them.
 for chunk in chunks {
     let fragment = stream.prepare_non_final_fragment(chunk)?;
     transport.write_all(fragment.as_bytes())?;

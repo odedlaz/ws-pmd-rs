@@ -602,8 +602,8 @@ impl<'encoder> StreamingMessage<'encoder> {
     ///
     /// All three steps, exactly as [`Encoder::prepare_message`] runs them over a
     /// whole message: the terminal `00 00 ff ff` is removed here and only here,
-    /// and a chunk that produces nothing becomes RFC 7692 section 7.2.3.6's
-    /// single `0x00` octet. The host frames the result with FIN set.
+    /// and an empty chunk becomes RFC 7692 section 7.2.3.6's single `0x00`
+    /// octet, by either route. The host frames the result with FIN set.
     ///
     /// Consuming the stream is what ends the message. There is no state to
     /// continue from afterwards, so a fragment after FIN is not something to
@@ -1006,12 +1006,13 @@ mod tests {
     /// Only a trailer at the end is stripped, and the nearest one behind it is
     /// not.
     ///
-    /// `gate-final-strip-bytes` cannot separate an exact tail removal from a
-    /// backward search: a sync-flushing producer always ends in the trailer, so
-    /// both find the same four octets. Output with an internal copy and no
-    /// terminal one is the input that separates them, and only a direct call can
-    /// supply it -- a backward scan truncates at the internal copy and returns a
-    /// short body as success.
+    /// The row that discriminates a backward search, and it is measured rather
+    /// than argued: under `rposition` plus truncate-at-the-match,
+    /// `gate-final-strip-bytes` stays green and this row is the only failure;
+    /// under `position`, both fail. So the corpus row bounds a forward scan and
+    /// this one bounds both. Its separating input -- an internal copy with no
+    /// terminal one -- needs a direct call to build, and the corpus row records
+    /// why no producer can emit it.
     #[test]
     fn only_a_terminal_trailer_is_stripped() {
         let mut internal_only = vec![0xf2, 0x48];

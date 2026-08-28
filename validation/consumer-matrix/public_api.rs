@@ -121,6 +121,11 @@ fn a_bidirectional_host_splits_the_pair_across_threads() {
 /// A streaming host: it does not have the whole message, and it writes each
 /// fragment before saying so.
 ///
+/// The sink is a `Vec` that has already accepted the octets when `commit` runs
+/// -- the "queue that cannot reject it" the method documents. A consumer with no
+/// I/O cannot do better, but it can at least put the write first, which is the
+/// ordering the encoder's transaction rests on.
+///
 /// The `thread::scope` is standing in for an await. A prepared fragment borrows
 /// the encoder, so it cannot be sent to a detached thread at all -- what a real
 /// async host does is hold it across a suspension point, and moving it into a
@@ -144,11 +149,12 @@ fn a_streaming_host_writes_each_fragment_before_committing_it() {
                     for (i, byte) in fragment.as_bytes_mut().iter_mut().enumerate() {
                         *byte ^= mask[i % 4];
                     }
-                    let (mut bytes, next) = fragment.commit();
-                    for (i, byte) in bytes.iter_mut().enumerate() {
+                    let mut sent = fragment.as_bytes().to_vec();
+                    let (_returned, next) = fragment.commit();
+                    for (i, byte) in sent.iter_mut().enumerate() {
                         *byte ^= mask[i % 4];
                     }
-                    (bytes, next)
+                    (sent, next)
                 })
                 .join()
                 .expect("the fragment crossed the boundary")

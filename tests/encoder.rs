@@ -77,7 +77,9 @@ impl Verifier {
     /// last and whatever followed it was never looked at. Returning the
     /// plaintext and stopping there accepts exactly that, which is a peer that
     /// agrees with a producer it never finished reading --
-    /// `gate-peer-oracle` is the row that fails without this.
+    /// `gate-peer-oracle` is the row that fails without the `StreamEnd` refusal.
+    /// The second refusal below is not pinned by any row; its own comment says
+    /// why it is kept anyway.
     fn accept(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let mut fed = wire.to_vec();
         fed.extend_from_slice(TRAILER);
@@ -96,6 +98,12 @@ impl Verifier {
             if status == Status::StreamEnd {
                 return Err(format!("ended with {} octets unread", input.len()));
             }
+            // Unpinned defence in depth. On every message tried this fires one
+            // round after the check above rather than instead of it, and no
+            // constructed input reaches it first -- so no row can go red on it
+            // alone, and a row that cannot fail would only launder that. Kept
+            // because a stall with input still to read is wrong whatever caused
+            // it: green here means unpinned, not unnecessary.
             if consumed == 0 && produced == 0 {
                 return Err(format!("no progress with {} octets left", input.len()));
             }
@@ -1147,8 +1155,7 @@ fn every_produced_non_final_fragment_keeps_its_trailer() {
 
 // ------------------------------------------------------- gate-final-strip-bytes
 
-/// The final fragment removes exactly the last four octets, and never searches
-/// for them.
+/// The final fragment removes exactly the last four octets.
 ///
 /// The expectation is built here rather than taken from the crate: a same-arm
 /// 1-MiB-buffered producer runs steps 1 and 2 over the identical chunk sequence,
@@ -1164,6 +1171,14 @@ fn every_produced_non_final_fragment_keeps_its_trailer() {
 /// an encoder that skipped step 3 entirely would pass every peer round trip in
 /// this file: an inflater accepts the extra empty block, so no round trip in
 /// either direction can stand in for this row.
+///
+/// What the row does *not* pin is how the four octets are found. Every case
+/// asserts the reference output ends in the trailer before comparing, so a
+/// backward search locates that terminal copy and agrees with an exact tail
+/// removal everywhere here -- including the two rows whose plaintext carries a
+/// copy of its own. Separating them needs a final fragment with an internal
+/// trailer and none at the end, and a producer that sync-flushes cannot emit
+/// one, so it is not a fixture this suite can build.
 #[test]
 fn the_final_fragment_strips_exactly_the_terminal_trailer() {
     let mut ends_with_trailer = b"stored plaintext ".to_vec();
@@ -1478,11 +1493,15 @@ fn the_final_commit_resets_only_under_no_context_takeover() {
 #[test]
 fn our_own_decoder_accepts_our_streamed_fragments() {
     const ROOMY: DecompressedLimit = DecompressedLimit::bytes(1 << 20);
-    let sequences: [Vec<&[u8]>; 4] = [
+    let sequences: [Vec<&[u8]>; 5] = [
         vec![b"single"],
         vec![b"head ", b"middle ", b"tail"],
         vec![b"a message ending empty", b""],
         vec![b"", b"a message starting empty"],
+        // A boundary declared after the compressor has already produced output,
+        // which is a different position from the first fragment being empty: the
+        // flush has bytes behind it rather than none.
+        vec![b"head ", b"", b"tail"],
     ];
 
     for chunks in &sequences {

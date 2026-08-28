@@ -101,8 +101,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # `--all-targets` is not a substitute: it excludes doctests, and ten of
-      # this crate's fifteen import sites are doctest lines under src/.
+      # `--all-targets` is not a substitute: it excludes doctests, and most of
+      # this crate's `ws_pmd::` import sites sit inside doc fences under `src/`.
+      # Population: `src`, `tests` and `validation`, excluding README.md and the
+      # separate fuzz workspace. Stated rather than counted -- the count here has
+      # gone stale twice, once before it was ever read.
       - name: Test
         env:
           RUSTFLAGS: -D warnings

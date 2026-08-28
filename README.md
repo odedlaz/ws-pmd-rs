@@ -146,8 +146,9 @@ let bytes = last.commit();
 
 The two differ on the wire and in what they cost. A non-final fragment keeps every
 `00 00 ff ff` its flush produced — removing it is what §7.2.1 forbids there — while the final
-one has exactly the terminal four octets removed, or is the single `0x00` octet if the
-message produced nothing. Each fragment ends in a sync flush, so streaming a message in many
+one has exactly the terminal four octets removed, or is the single `0x00` octet when that
+last flush produced nothing — which happens after an earlier fragment has already drained
+the compressor, not only for a message that was empty all along. Each fragment ends in a sync flush, so streaming a message in many
 small pieces compresses it less well than handing over the whole thing; use
 `prepare_message` whenever the message is already in memory. An empty non-final chunk is a
 legal boundary and may return no bytes at all, after an earlier fragment has already flushed.
@@ -161,9 +162,10 @@ guard, a cancelled write — leaves the encoder poisoned, because a host whose w
 cancelled after an unknown number of octets cannot know what the peer received.
 
 The streaming states are the same transaction, one fragment at a time, with one difference:
-there is no `reset_to_plain`. Once a fragment has committed its octets are on the wire and
-the peer has inflated them, so the message cannot be re-sent uncompressed; an exit that
-stopped working part-way through a message would be worse than none.
+there is no `reset_to_plain`. Committing says the octets have irrevocably left the host —
+written in full, or handed to a queue that cannot reject them — so the message can no longer
+be re-sent uncompressed, whether or not the peer has read it yet; an exit that stopped
+working part-way through a message would be worse than none.
 
 `DecompressedLimit` has no unbounded spelling. Compressed input is the one path where a
 small frame can ask for arbitrary memory, so a host whose plain-message setting is unbounded

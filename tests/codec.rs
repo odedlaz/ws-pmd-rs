@@ -81,12 +81,16 @@ impl Peer {
         wire
     }
 
-    /// One message split at a flush boundary, which is what a peer's fragments
-    /// look like under either RFC 7692 section 7.2.1 strategy: whether the peer
-    /// compressed the whole message and its host split the result, or the peer
-    /// compressed each fragment as its payload arrived, the wire carries a flush
-    /// boundary per fragment and only the last one loses its trailer. This
-    /// fixture is the decoder's input either way, so it does not have to pick.
+    /// One message split at a flush boundary: what a peer produces when it
+    /// compresses each fragment as its payload arrives, which is one of the two
+    /// producers RFC 7692 section 7.2.1 permits. `flush(head)` then `send(tail)`
+    /// puts a boundary at a flush by construction.
+    ///
+    /// The other producer compresses the whole message and lets its host split
+    /// the result anywhere, so a boundary can fall mid-block with no flush at
+    /// it. Nothing in this file builds that input -- every multi-fragment
+    /// message here either comes from this helper or is assembled fragment by
+    /// fragment -- so this fixture does not stand in for it.
     fn send_in_two(&mut self, head: &[u8], tail: &[u8]) -> (Vec<u8>, Vec<u8>) {
         (self.flush(head), self.send(tail))
     }
@@ -382,10 +386,9 @@ fn rfc_7692_7_2_1_the_mandatory_tail_may_arrive_in_a_later_fragment() {
     assert_eq!(got, b"Hello", "the tail licenses the trailer wherever it arrives");
 }
 
-/// And the same split with the tail nowhere in the message, which is Dario's
-/// probe shape once its polarity is corrected: a bare finished stream in a
-/// non-final fragment and nothing after it. The missing-tail answer has to hold
-/// across a fragment boundary too, not only within one call.
+/// And the same split with the tail nowhere in the message: a bare finished
+/// stream in a non-final fragment and nothing after it. The missing-tail answer
+/// has to hold across a fragment boundary too, not only within one call.
 #[test]
 fn a_bare_finished_stream_is_rejected_across_a_fragment_boundary() {
     let mut decoder = plain_decoder();

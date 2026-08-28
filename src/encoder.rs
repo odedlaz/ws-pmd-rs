@@ -290,7 +290,8 @@ impl Encoder {
     /// # let mut wire: Vec<Vec<u8>> = Vec::new();
     /// let mut stream = encoder.begin_streaming_message()?;
     ///
-    /// // One continuation frame per chunk. RSV1 on the first, FIN on none.
+    /// // The first frame carries the message opcode and RSV1; the rest are
+    /// // continuations. FIN on none of them.
     /// for chunk in [&b"the first half "[..], &b"and the second"[..]] {
     ///     let fragment = stream.prepare_non_final_fragment(chunk)?;
     ///     wire.push(fragment.as_bytes().to_vec()); // write it, then commit
@@ -661,8 +662,8 @@ impl<'encoder> PreparedNonFinalFragment<'encoder> {
     ///
     /// The returned tuple carries the only value that can prepare the next
     /// fragment, so dropping it on the floor is the one mistake this shape
-    /// cannot make unrepresentable. Under `deny(unused_must_use)` it is a build
-    /// failure:
+    /// cannot make unrepresentable. Under `deny(unused_must_use)` a bare
+    /// discarded call is a build failure:
     ///
     /// ```compile_fail
     /// #![deny(unused_must_use)]
@@ -715,7 +716,11 @@ impl<'encoder> PreparedNonFinalFragment<'encoder> {
     /// let (_bytes, _open) = pending.commit();
     /// # Ok::<(), ws_pmd::CodecError>(())
     /// ```
-    #[must_use = "dropping the returned stream poisons the encoder"]
+    ///
+    /// That is the bare expression and nothing else. `let _ = pending.commit()`
+    /// and `pending.commit().0` both compile: the first is Rust's own opt-out,
+    /// the second keeps the bytes and drops the stream. Both poison the encoder,
+    /// and both are caught at the next entry rather than at build time.
     pub fn commit(self) -> (Vec<u8>, StreamingMessage<'encoder>) {
         let Self { encoder, compressor, bytes } = self;
         (bytes, StreamingMessage { encoder, compressor })

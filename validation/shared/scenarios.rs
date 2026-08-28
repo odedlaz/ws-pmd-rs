@@ -2,7 +2,7 @@
 // made into a crate: one copy so the arms cannot drift, and no crate that could
 // be built with the other arm's backend.
 //
-// Payload and protocol are Octo's frozen reproducer
+// Payload and protocol are the frozen far-reference reproducer's
 // (`RESEARCH/PMD_FAR_REFERENCE_REPRODUCER_2026_08_23/`). What differs here is the
 // driver: these go through the crate's public `Decoder`, which is chunked at its
 // own `SCRATCH`, rather than through `flate2` directly.
@@ -28,7 +28,7 @@ enum Outcome {
     Rejected(CodecError),
 }
 
-/// Octo's generator, unchanged, so both arms see identical bytes.
+/// The reproducer's generator, unchanged, so both arms see identical bytes.
 fn rnd(n: usize, seed: u32) -> Vec<u8> {
     let mut s = seed | 1;
     let mut v = Vec::with_capacity(n + 4);

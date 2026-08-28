@@ -7,7 +7,7 @@
 //! examples, which were published in 2015 and owe nothing to `flate2` or to us.
 #![expect(clippy::expect_used, clippy::indexing_slicing, reason = "a panic is how a test reports")]
 
-use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress};
+use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 use http::{header::SEC_WEBSOCKET_EXTENSIONS, HeaderMap, HeaderValue};
 use ws_pmd::{
     ClientConfig, ClientOffer, CodecError, Decoder, DecompressedLimit, Encoder, EncoderConfig,
@@ -70,6 +70,14 @@ impl Verifier {
     /// A whole-message candidate and a streamed message's fragments concatenated
     /// in order are the same input here: one message loses exactly one trailer,
     /// wherever it was produced, so the feed-back is the same either way.
+    ///
+    /// The message must also be *read*, not merely decoded. RFC 7692's tail is
+    /// an empty **non-final** stored block, so a conforming message leaves this
+    /// inflater open and waiting; `StreamEnd` means some block claimed to be the
+    /// last and whatever followed it was never looked at. Returning the
+    /// plaintext and stopping there accepts exactly that, which is a peer that
+    /// agrees with a producer it never finished reading --
+    /// `gate-peer-oracle` is the row that fails without this.
     fn accept(&mut self, wire: &[u8]) -> Result<Vec<u8>, String> {
         let mut fed = wire.to_vec();
         fed.extend_from_slice(TRAILER);
@@ -78,18 +86,49 @@ impl Verifier {
         while !input.is_empty() {
             out.reserve(1 << 16);
             let before = (self.0.total_in(), self.0.total_out());
-            self.0
+            let status = self
+                .0
                 .decompress_vec(input, &mut out, FlushDecompress::None)
                 .map_err(|error| error.to_string())?;
             let consumed = usize::try_from(self.0.total_in() - before.0).expect("fits");
             let produced = self.0.total_out() - before.1;
             input = &input[consumed..];
+            if status == Status::StreamEnd {
+                return Err(format!("ended with {} octets unread", input.len()));
+            }
             if consumed == 0 && produced == 0 {
-                break;
+                return Err(format!("no progress with {} octets left", input.len()));
             }
         }
         Ok(out)
     }
+}
+
+/// `Verifier::accept` without those two refusals: it returns the plaintext and
+/// stops at the first round that makes no progress.
+///
+/// Kept for one row, which needs to show what an oracle that reads this way
+/// accepts. Nothing else may use it.
+fn without_the_tail_checks(wire: &[u8]) -> Result<Vec<u8>, String> {
+    let mut inflater = Decompress::new_with_window_bits(false, 15);
+    let mut fed = wire.to_vec();
+    fed.extend_from_slice(TRAILER);
+    let mut out = Vec::new();
+    let mut input = fed.as_slice();
+    while !input.is_empty() {
+        out.reserve(1 << 16);
+        let before = (inflater.total_in(), inflater.total_out());
+        inflater
+            .decompress_vec(input, &mut out, FlushDecompress::None)
+            .map_err(|error| error.to_string())?;
+        let consumed = usize::try_from(inflater.total_in() - before.0).expect("fits");
+        let produced = inflater.total_out() - before.1;
+        input = &input[consumed..];
+        if consumed == 0 && produced == 0 {
+            break;
+        }
+    }
+    Ok(out)
 }
 
 /// RFC 7692 section 7.2.1 run by hand on `flate2`, for the rows that compare the
@@ -915,6 +954,51 @@ fn a_host_drives_the_whole_streaming_sequence() {
     assert_eq!(
         peer.accept(&send(&mut encoder, b"after the stream")).expect("valid"),
         b"after the stream"
+    );
+}
+
+// ------------------------------------------------------------ gate-peer-oracle
+
+/// The oracle every other row is measured through, against a message it must
+/// refuse.
+///
+/// Setting BFINAL on the first block leaves the DEFLATE stream decodable and
+/// ends it early: the plaintext still comes out, and the four octets this
+/// verifier appended are never read. An inflater that reports only the
+/// plaintext therefore calls a wire correct while agreeing with a producer it
+/// stopped reading, and every payload assertion in this file inherits that.
+///
+/// Measured, not assumed: on this message `Verifier` consumes 11 of 11 octets
+/// and never reports `StreamEnd`; with the bit set it consumes 7 and does.
+///
+/// The refusal is pinned to the `StreamEnd` arm by its message. The
+/// zero-progress arm catches this same input one round later and is kept as a
+/// second detector, but no input here separates the two -- so this row shows
+/// that at least one refusal fires, and which one, rather than exercising both.
+#[test]
+fn an_early_final_block_is_read_as_a_message_that_ended_unread() {
+    let mut encoder = takeover_encoder();
+    let wire = send(&mut encoder, b"Hello");
+
+    let mut early = wire.clone();
+    early[0] |= 0b0000_0001;
+
+    assert_eq!(
+        without_the_tail_checks(&early).as_deref(),
+        Ok(&b"Hello"[..]),
+        "an oracle that stops at the plaintext calls this message correct",
+    );
+
+    let refused = Verifier::new().accept(&early).expect_err("the trailer went unread");
+    assert!(
+        refused.contains("ended with 4 octets unread"),
+        "refused, but not as a premature end: {refused}",
+    );
+
+    assert_eq!(
+        Verifier::new().accept(&wire).expect("valid stream"),
+        b"Hello",
+        "and the message the encoder actually produced still passes",
     );
 }
 

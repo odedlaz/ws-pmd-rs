@@ -13,15 +13,12 @@ The crate is `ws-pmd`; its repository is `ws-pmd-rs`. Where this document writes
 
 ## Status
 
-Version 0.1.0, unreleased. It is not published to crates.io. The public API is the
-smallest surface that serves the target integrations, and it may change before 1.0 as
-those integrations land.
-
-Until it is published, depend on it by git reference:
+The public API is the smallest surface that serves the target integrations, and it may
+change before 1.0 as those integrations land.
 
 ```toml
 [dependencies]
-ws-pmd = { git = "https://github.com/odedlaz/ws-pmd-rs" }
+ws-pmd = "0.1"
 ```
 
 ## Scope

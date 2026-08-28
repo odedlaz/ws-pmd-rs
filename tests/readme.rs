@@ -11,9 +11,9 @@
 //! the README still says what compiles.
 //!
 //! It is scoped to `rust` fences, so the README's `toml` dependency block is outside the
-//! pin. That is not an oversight to correct: the block states how to depend on an
-//! unpublished crate, so it is expected to change on its own schedule, and pinning it would
-//! turn this test red at the next version bump for a reason nobody would connect to it.
+//! pin. That is not an oversight to correct: the block states which version to depend on,
+//! so it is expected to change on its own schedule, and pinning it would turn this test red
+//! at the next version bump for a reason nobody would connect to it.
 //! Adding a `toml` fence leaves the count alone; converting one to `rust` does not.
 //!
 //! And it is a *text* instrument. It proves the README's blocks appear here; the compiler
